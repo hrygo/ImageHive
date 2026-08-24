@@ -12,10 +12,6 @@ import XCTest
 
 final class AttentionInternalsTests: XCTestCase {
 
-    override class func setUp() {
-        super.setUp()
-        Device.setDefault(device: Device.cpu)
-    }
 
     func fx(_ name: String) throws -> MLXArray {
         try NPY.load(ComponentParityTests.fixturesDir.appendingPathComponent("\(name).npy"))
@@ -30,6 +26,7 @@ final class AttentionInternalsTests: XCTestCase {
     }
 
     func testGenAttentionStages() throws {
+        try Device.withDefaultDevice(Device.cpu) {
         let store = try ComponentParityTests.ShardStore(ComponentParityTests.weightsDir)
         let cfg = try NEOChatConfig.load(from: ComponentParityTests.weightsDir)
         let attn = MoTAttention(cfg.llm)
@@ -105,9 +102,12 @@ final class AttentionInternalsTests: XCTestCase {
         let (outModule, _) = attn(x, stream: .gen, indexes: idxs, mask: nil, prefixKV: nil)
         _ = report("module == staged", outModule, out)
         XCTAssertLessThanOrEqual(dOut, 1e-3, "final out")
+        }
     }
 
+
     func testGenDecoderLayerStages() throws {
+        try Device.withDefaultDevice(Device.cpu) {
         let store = try ComponentParityTests.ShardStore(ComponentParityTests.weightsDir)
         let cfg = try NEOChatConfig.load(from: ComponentParityTests.weightsDir)
         let layer = MoTDecoderLayer(cfg.llm)
@@ -133,5 +133,7 @@ final class AttentionInternalsTests: XCTestCase {
         let final = h1 + mlpOut
         let d = report("final", final, try fx("layer0_gen_final"))
         XCTAssertLessThanOrEqual(d / 433951, 1e-5, "layer final (relative)")
+        }
     }
+
 }

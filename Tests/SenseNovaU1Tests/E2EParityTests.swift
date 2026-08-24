@@ -17,12 +17,10 @@ import XCTest
 
 final class E2EParityTests: XCTestCase {
 
-    override class func setUp() {
-        super.setUp()
-        // The component suites pin the CPU stream and that leaks process-wide;
-        // e2e runs the SHIPPING configuration: bf16 on the GPU.
-        Device.setDefault(device: Device.gpu)
-    }
+    // The component suites pin the CPU stream and that leaks; a CLASS-level
+    // re-pin did NOT take effect when other suites ran first (measured: 142 s
+    // wall + cos 0.9722 = the CPU-stream signature), so pin per-test on the
+    // executing thread. e2e runs the SHIPPING configuration: bf16 on the GPU.
 
     static let fixturesDir: URL = {
         if let env = ProcessInfo.processInfo.environment["SENSENOVA_T2I_FIXTURES"] {
@@ -68,6 +66,7 @@ final class E2EParityTests: XCTestCase {
     }
 
     func testTimestepSchedule() throws {
+        try Device.withDefaultDevice(Device.gpu) {
         let cfg = try NEOChatConfig.load(from: ComponentParityTests.weightsDir)
         let model = NEOChatModel(cfg)  // schedule is weight-free
         let ts = model.shiftedTimesteps(numSteps: 4, shift: 3.0, enable: true)
@@ -75,9 +74,12 @@ final class E2EParityTests: XCTestCase {
         for (a, b) in zip(ts, ref) {
             XCTAssertEqual(a, b, accuracy: 1e-6)
         }
+        }
     }
 
+
     func testPrefillParity() throws {
+        try Device.withDefaultDevice(Device.gpu) {
         let model = try getModel()
         let condIds = try ids("prefix_cond_input_ids")
 
@@ -102,9 +104,12 @@ final class E2EParityTests: XCTestCase {
             XCTAssertGreaterThan(cK, 0.999, "k l\(li)")
             XCTAssertGreaterThan(cV, 0.999, "v l\(li)")
         }
+        }
     }
 
+
     func testStepZeroParity() throws {
+        try Device.withDefaultDevice(Device.gpu) {
         let model = try getModel()
         let condIds = try ids("prefix_cond_input_ids")
         let uncondIds = try ids("prefix_uncond_input_ids")
@@ -149,7 +154,7 @@ final class E2EParityTests: XCTestCase {
             embeds: imageEmbeds, stream: .gen, indexes: idxCond, mask: nil,
             prefixKV: prefixCond, collectKV: false)
         let (_, cosBH) = stats("s0 backbone hidden", hidden, try fx("s0_cond_backbone_hidden"))
-        XCTAssertGreaterThan(cosBH, 0.985, "backbone hidden")  // run-to-run GPU jitter observed 0.9894–0.9990 under contention
+        XCTAssertGreaterThan(cosBH, 0.998, "backbone hidden")  // GPU runs are deterministic (0.99900 measured); 0.9894 was the CPU-stream leak
 
         let vCond = model.predictV(
             imageEmbeds: imageEmbeds, indexes: idxCond, prefixKV: prefixCond,
@@ -164,9 +169,12 @@ final class E2EParityTests: XCTestCase {
             z: z, t: tVal, tokenH: tokenH, tokenW: tokenW, tEps: 0.02)
         let (_, cosVU) = stats("s0 v_uncond", vUncond, try fx("s0_uncond_v"))
         XCTAssertGreaterThan(cosVU, 0.99, "v_uncond")
+        }
     }
 
+
     func testFourStepImage() throws {
+        try Device.withDefaultDevice(Device.gpu) {
         let model = try getModel()
         let condIds = try ids("prefix_cond_input_ids")
         let uncondIds = try ids("prefix_uncond_input_ids")
@@ -208,7 +216,9 @@ final class E2EParityTests: XCTestCase {
         // cross-backend bf16 rounding into a slightly different (equally valid)
         // trajectory; the load-bearing gates are the per-pass cosines above +
         // the decoded-image eyeball (quantized-generative doctrine).
-        XCTAssertGreaterThan(cosImg, 0.97, "final image cosine")
-        XCTAssertGreaterThan(psnr, 19, "final image PSNR (bf16 backend-drift floor incl. GPU run-to-run jitter)")
+        XCTAssertGreaterThan(cosImg, 0.98, "final image cosine")  // GPU deterministic: 0.98621 measured twice bit-identically
+        XCTAssertGreaterThan(psnr, 22, "final image PSNR (bf16 cross-backend trajectory drift; 22.615 measured)")
+        }
     }
+
 }

@@ -38,11 +38,6 @@ final class ComponentParityTests: XCTestCase {
             .appendingPathComponent("weights/SenseNova-U1.5-8B-MoT")
     }()
 
-    override class func setUp() {
-        super.setUp()
-        // fp32 parity runs on the CPU stream (GPU fp32 matmul noise masks op bugs)
-        Device.setDefault(device: Device.cpu)
-    }
 
     func fx(_ name: String) throws -> MLXArray {
         try NPY.load(Self.fixturesDir.appendingPathComponent("\(name).npy"))
@@ -128,6 +123,7 @@ final class ComponentParityTests: XCTestCase {
     // MARK: - weight-free tests
 
     func testRopeTables() throws {
+        try Device.withDefaultDevice(Device.cpu) {
         let cfg = try config
         let rotT = DualAxisRotary(dim: cfg.llm.headDim / 2, theta: cfg.llm.ropeTheta)
         let rotHW = DualAxisRotary(dim: cfg.llm.headDim / 4, theta: cfg.llm.ropeThetaHW)
@@ -142,9 +138,12 @@ final class ComponentParityTests: XCTestCase {
         assertClose(sinT.reshaped([1, 128, -1]), try fx("rope_sin_t_128"), atol: 1e-5, "sin t")
         assertClose(cosHW.reshaped([1, 128, -1]), try fx("rope_cos_hw_128"), atol: 1e-5, "cos hw")
         assertClose(sinHW.reshaped([1, 128, -1]), try fx("rope_sin_hw_128"), atol: 1e-5, "sin hw")
+        }
     }
 
+
     func testBlockCausalMask() throws {
+        try Device.withDefaultDevice(Device.cpu) {
         let tIdx = try fx("block_causal_t_idx").asType(.int32)
         let mask = createBlockCausalMask(tIndexes: tIdx)
         let ref = try fx("block_causal_mask")
@@ -152,9 +151,12 @@ final class ComponentParityTests: XCTestCase {
         let allowOurs = mask .== MLXArray(Float(0))
         let allowRef = ref .== MLXArray(Float(0))
         XCTAssertTrue((allowOurs .== allowRef).all().item(Bool.self), "mask structure")
+        }
     }
 
+
     func testPatchifyRoundtrip() throws {
+        try Device.withDefaultDevice(Device.cpu) {
         let cfg = try config
         let model = NEOChatModel(cfg)  // random weights fine — pure reshapes
         let img = try fx("patchify_img")
@@ -165,20 +167,26 @@ final class ComponentParityTests: XCTestCase {
         assertClose(
             model.unpatchify(model.patchify(img, patchSize: 32), patchSize: 32, height: 64, width: 96),
             img, atol: 0, "roundtrip")
+        }
     }
 
+
     func testPromptTemplate() throws {
+        try Device.withDefaultDevice(Device.cpu) {
         let data = try Data(contentsOf: Self.fixturesDir.appendingPathComponent("prompts.json"))
         let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let prompt = obj["prompt"] as! String
         XCTAssertEqual(Conversation.t2iCondPrompt(prompt), obj["cond_text"] as! String, "cond prompt")
         XCTAssertEqual(Conversation.t2iUncondPrompt(), obj["uncond_text"] as! String, "uncond prompt")
         XCTAssertEqual(Conversation.imgStartTokenID, Int32(obj["img_start_token_id"] as! Int), "<img> id")
+        }
     }
+
 
     // MARK: - weight-backed component tests
 
     func testTimestepEmbedders() throws {
+        try Device.withDefaultDevice(Device.cpu) {
         let store = try getStore()
         for name in ["timestep_embedder", "noise_scale_embedder"] {
             let mod = TimestepEmbedder(hiddenSize: 4096)
@@ -190,9 +198,12 @@ final class ComponentParityTests: XCTestCase {
             assertClose(sinus, try fx("\(name)_sinusoid"), atol: 1e-6, "\(name) sinusoid")
             assertClose(mod(t), try fx("\(name)_out"), atol: 1e-3, "\(name) out")
         }
+        }
     }
 
+
     func testConvDecoder() throws {
+        try Device.withDefaultDevice(Device.cpu) {
         let store = try getStore()
         let mod = ConvDecoder(inputDim: 4096)
         try mod.update(
@@ -214,9 +225,12 @@ final class ComponentParityTests: XCTestCase {
         assertClose(s3, try fx("conv_decoder_ps2").transposed(0, 2, 3, 1), atol: 1e-3, "ps2")
         let s4 = mod.conv2(s3)
         assertClose(s4, try fx("conv_decoder_conv2").transposed(0, 2, 3, 1), atol: 1e-3, "conv2")
+        }
     }
 
+
     func testVisionPatchify() throws {
+        try Device.withDefaultDevice(Device.cpu) {
         let store = try getStore()
         let cfg = try config
         let gridHW = try fx("vision_grid_hw").asType(.int32)
@@ -231,9 +245,12 @@ final class ComponentParityTests: XCTestCase {
             let out = mod(input, gridH: Int(gh), gridW: Int(gw))
             assertClose(out, try fx("vision_\(tag)_out"), atol: 1e-3, "vision \(tag) out")
         }
+        }
     }
 
+
     func testDecoderLayers() throws {
+        try Device.withDefaultDevice(Device.cpu) {
         let store = try getStore()
         let cfg = try config
 
@@ -266,5 +283,7 @@ final class ComponentParityTests: XCTestCase {
             let (outC, _) = layer(xg, stream: .gen, indexes: indexesG, mask: nil, prefixKV: (pk, pv))
             assertCloseRel(outC, try fx("\(tag)_gen_cached_out"), rtol: 1e-5, "\(tag) gen+cache")
         }
+        }
     }
+
 }
