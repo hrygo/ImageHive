@@ -32,18 +32,7 @@ final class E2EParityTests: XCTestCase {
             .appendingPathComponent("sensenova-u1-oracle/fixtures/t2i_256x256_s4_bf16")
     }()
 
-    nonisolated(unsafe) static var model: NEOChatModel!
-
-    func getModel() throws -> NEOChatModel {
-        if Self.model == nil {
-            print("[e2e] loading full model bf16 ...")
-            let t0 = Date()
-            Self.model = try WeightLoading.load(
-                from: ComponentParityTests.weightsDir, dtype: .bfloat16)
-            print("[e2e] loaded in \(Date().timeIntervalSince(t0))s")
-        }
-        return Self.model
-    }
+    func getModel() throws -> NEOChatModel { try SharedTestModel.get() }
 
     func fx(_ name: String) throws -> MLXArray {
         try NPY.load(Self.fixturesDir.appendingPathComponent("\(name).npy"))

@@ -21,8 +21,21 @@ func loadIDs(_ path: String) throws -> [Int32] {
 }
 
 let weights = URL(fileURLWithPath: arg("weights") ?? "/Volumes/Satechi/Development/mlxengine-image/weights/SenseNova-U1.5-8B-MoT")
-let width = Int(arg("width") ?? "1024")!
-let height = Int(arg("height") ?? "1024")!
+let editImage: EditImage? = try arg("edit-image").map {
+    try SenseNovaImageIO.loadEditImage(url: URL(fileURLWithPath: $0))
+}
+// editing default output: first input's aspect at ~2048² pixels (factor 32)
+var width = Int(arg("width") ?? "1024")!
+var height = Int(arg("height") ?? "1024")!
+if let img = editImage, arg("width") == nil, arg("height") == nil {
+    let target = Int(arg("target-pixels") ?? "\(2048 * 2048)")!
+    let (h, w) = SenseNovaImageIO.smartResize(
+        height: img.gridH * 16, width: img.gridW * 16, factor: 32,
+        minPixels: target, maxPixels: target)
+    width = w
+    height = h
+    print("[cli] edit output size resolved to \(width)x\(height)")
+}
 var params = T2IParams()
 params.numSteps = Int(arg("steps") ?? "20")!
 if let s = arg("seed") { params.seed = UInt64(s)! }
@@ -31,12 +44,20 @@ let outPath = arg("out") ?? "sensenova_out.npy"
 
 let condIds: [Int32]
 let uncondIds: [Int32]?
+var imgCondIds: [Int32]? = nil
 if let prompt = arg("prompt") {
     let tok = try await SenseNovaTokenizer.load(from: weights)
-    let pair = tok.t2iIDs(prompt: prompt)
-    condIds = pair.cond
-    uncondIds = params.cfgScale > 1 ? pair.uncond : nil
-    print("[cli] prompt tokenized: \(condIds.count) cond ids\(uncondIds != nil ? ", \(uncondIds!.count) uncond" : " (no CFG)")")
+    if let img = editImage {
+        condIds = tok.encode(Conversation.editCondPrompt(prompt, imageTokenCounts: [img.tokenCount]))
+        imgCondIds = tok.encode(Conversation.editImgCondPrompt(imageTokenCounts: [img.tokenCount]))
+        uncondIds = nil  // editing default img_cfg == 1 needs no uncond branch
+        print("[cli] edit prompt tokenized: \(condIds.count) cond, \(imgCondIds!.count) img-cond ids")
+    } else {
+        let pair = tok.t2iIDs(prompt: prompt)
+        condIds = pair.cond
+        uncondIds = params.cfgScale > 1 ? pair.uncond : nil
+        print("[cli] prompt tokenized: \(condIds.count) cond ids\(uncondIds != nil ? ", \(uncondIds!.count) uncond" : " (no CFG)")")
+    }
 } else {
     condIds = try loadIDs(arg("cond-ids")!)
     uncondIds = arg("uncond-ids").map { try! loadIDs($0) }
@@ -50,13 +71,27 @@ print("[cli] loaded in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s"
 print("[cli] resident after load: \(GPU.activeMemory / (1 << 20)) MB active, peak \(GPU.peakMemory / (1 << 20)) MB")
 
 t0 = Date()
-let image = model.t2iGenerate(
-    condIds: condIds, uncondIds: uncondIds, width: width, height: height,
-    params: params
-) { step, total in
-    if step % 5 == 0 || step == total {
-        let dt = Date().timeIntervalSince(t0)
-        print("[cli] step \(step)/\(total)  \(String(format: "%.2f", dt / Double(step)))s/step  active \(GPU.activeMemory / (1 << 20)) MB")
+let image: MLXArray
+if let img = editImage {
+    image = model.it2iGenerate(
+        condIds: condIds, imgCondIds: imgCondIds, uncondIds: uncondIds,
+        images: [img], width: width, height: height,
+        params: params, imgCfgScale: Float(arg("img-cfg") ?? "1.0")!
+    ) { step, total in
+        if step % 5 == 0 || step == total {
+            let dt = Date().timeIntervalSince(t0)
+            print("[cli] step \(step)/\(total)  \(String(format: "%.2f", dt / Double(step)))s/step  active \(GPU.activeMemory / (1 << 20)) MB")
+        }
+    }
+} else {
+    image = model.t2iGenerate(
+        condIds: condIds, uncondIds: uncondIds, width: width, height: height,
+        params: params
+    ) { step, total in
+        if step % 5 == 0 || step == total {
+            let dt = Date().timeIntervalSince(t0)
+            print("[cli] step \(step)/\(total)  \(String(format: "%.2f", dt / Double(step)))s/step  active \(GPU.activeMemory / (1 << 20)) MB")
+        }
     }
 }
 eval(image)
