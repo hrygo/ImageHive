@@ -192,11 +192,11 @@ public final class NEOChatModel: Module {
         params: T2IParams = T2IParams(),
         injectedNoise: MLXArray? = nil,
         onStep: ((Int, Int) -> Void)? = nil
-    ) -> MLXArray {
+    ) throws -> MLXArray {
         let needsCFG = params.cfgScale > 1 && uncondIds != nil
         let prefixCond = prefillText(condIds)
         let prefixUncond = needsCFG ? prefillText(uncondIds!) : []
-        return t2iDenoise(
+        return try t2iDenoise(
             prefixCond: prefixCond, condImageT: Int32(condIds.count),
             prefixUncond: prefixUncond,
             uncondImageT: needsCFG ? Int32(uncondIds!.count) : 0,
@@ -219,7 +219,7 @@ public final class NEOChatModel: Module {
         params: T2IParams,
         injectedNoise: MLXArray?,
         onStep: ((Int, Int) -> Void)?
-    ) -> MLXArray {
+    ) throws -> MLXArray {
         let px = config.pixelsPerToken           // 32
         let (tokenH, tokenW) = (height / px, width / px)
         let (gridH, gridW) = (height / config.patchSize, width / config.patchSize)
@@ -252,6 +252,7 @@ public final class NEOChatModel: Module {
 
         // -- denoise loop --
         for step in 0 ..< params.numSteps {
+            try Task.checkCancellation()  // CAN cadence: per denoise step
             let t = timesteps[step]
             let tNext = timesteps[step + 1]
 

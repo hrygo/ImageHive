@@ -176,7 +176,7 @@ final class E2EParityTests: XCTestCase {
         params.tEps = 0.02
 
         let t0 = Date()
-        let image = model.t2iGenerate(
+        let image = try model.t2iGenerate(
             condIds: condIds, uncondIds: uncondIds, width: 256, height: 256,
             params: params, injectedNoise: noise)
         eval(image)

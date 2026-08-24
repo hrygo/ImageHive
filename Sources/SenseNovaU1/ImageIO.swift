@@ -52,6 +52,23 @@ public enum SenseNovaImageIO {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let cg = CGImageSourceCreateImageAtIndex(source, 0, nil)
         else { throw SenseNovaError.badConfig("cannot read image at \(url.path)") }
+        return try editImage(from: cg, patchSize: patchSize, minPixels: minPixels, maxPixels: maxPixels)
+    }
+
+    /// Encoded image bytes (PNG/JPEG) → `EditImage`.
+    public static func loadEditImage(
+        data: Data, patchSize: Int = 16,
+        minPixels: Int = 512 * 512, maxPixels: Int = 2048 * 2048
+    ) throws -> EditImage {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cg = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { throw SenseNovaError.badConfig("cannot decode image data") }
+        return try editImage(from: cg, patchSize: patchSize, minPixels: minPixels, maxPixels: maxPixels)
+    }
+
+    static func editImage(
+        from cg: CGImage, patchSize: Int, minPixels: Int, maxPixels: Int
+    ) throws -> EditImage {
 
         let (h, w) = smartResize(
             height: cg.height, width: cg.width, factor: 2 * patchSize,

@@ -65,7 +65,7 @@ if let question = arg("vqa") {
     sampling.maxNewTokens = Int(arg("max-tokens") ?? "512")!
     let t1 = Date()
     var count = 0
-    let answer = model.chat(ids: ids, images: images, params: sampling) { _ in count += 1 }
+    let answer = try model.chat(ids: ids, images: images, params: sampling) { _ in count += 1 }
     let dt = Date().timeIntervalSince(t1)
     print("[cli] answer (\(count) tokens, \(String(format: "%.1f", Double(count) / dt)) tok/s):")
     print(tok.decode(answer))
@@ -137,7 +137,7 @@ if flag("think"), let prompt = arg("prompt"), editImage == nil {
     let uncond = params.cfgScale > 1 ? tok.encode(Conversation.t2iUncondPrompt()) : nil
     let imgSuffix = tok.encode("\n\n" + Conversation.imgStartToken)
     print("[cli] think-mode: reasoning ...")
-    let (thinkImage, thinkIds) = model.t2iGenerateThink(
+    let (thinkImage, thinkIds) = try model.t2iGenerateThink(
         condThinkIds: condThinkIds, uncondIds: uncond, imgSuffixIds: imgSuffix,
         width: width, height: height, params: params
     ) { _ in
@@ -154,7 +154,7 @@ if flag("think"), let prompt = arg("prompt"), editImage == nil {
 }
 let image: MLXArray
 if let img = editImage {
-    image = model.it2iGenerate(
+    image = try model.it2iGenerate(
         condIds: condIds, imgCondIds: imgCondIds, uncondIds: uncondIds,
         images: [img], width: width, height: height,
         params: params, imgCfgScale: Float(arg("img-cfg") ?? "1.0")!
@@ -165,7 +165,7 @@ if let img = editImage {
         }
     }
 } else {
-    image = model.t2iGenerate(
+    image = try model.t2iGenerate(
         condIds: condIds, uncondIds: uncondIds, width: width, height: height,
         params: params
     ) { step, total in

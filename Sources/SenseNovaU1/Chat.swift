@@ -110,7 +110,7 @@ extension NEOChatModel {
         forwardStopIntoCache: Set<Int32> = [],
         params: SamplingParams = SamplingParams(),
         onToken: ((Int32) -> Void)? = nil
-    ) -> (tokens: [Int32], t: Int32) {
+    ) throws -> (tokens: [Int32], t: Int32) {
         if params.temperature > 0 { MLXRandom.seed(params.seed) }
         // reference: `current_index = t_idx` then the forward INCREMENTS before
         // use — each new token's temporal index is (running max) + 1.
@@ -118,6 +118,7 @@ extension NEOChatModel {
         var next = sample(firstLogits, params: params)
         var out: [Int32] = []
         for _ in 0 ..< params.maxNewTokens {
+            try Task.checkCancellation()  // CAN cadence: per generated token
             if stopTokens.contains(next) {
                 if forwardStopIntoCache.contains(next) {
                     _ = decodeStep(token: next, t: t + 1, cache: cache)
@@ -167,13 +168,13 @@ extension NEOChatModel {
         images: [EditImage] = [],
         params: SamplingParams = SamplingParams(),
         onToken: ((Int32) -> Void)? = nil
-    ) -> [Int32] {
+    ) throws -> [Int32] {
         let (embeds, indexes, mask, _) =
             images.isEmpty
             ? textOnlyInputs(ids: ids)
             : buildIT2IInputs(ids: ids, images: images)
         let (cache, logits, maxT) = prefillForDecode(embeds: embeds, indexes: indexes, mask: mask)
-        let (tokens, _) = generateText(
+        let (tokens, _) = try generateText(
             cache: cache, firstLogits: logits, startT: maxT,
             stopTokens: [ChatToken.imEnd], params: params, onToken: onToken)
         return tokens
@@ -195,10 +196,10 @@ extension NEOChatModel {
         injectedNoise: MLXArray? = nil,
         onToken: ((Int32) -> Void)? = nil,
         onStep: ((Int, Int) -> Void)? = nil
-    ) -> (image: MLXArray, thinkIds: [Int32]) {
+    ) throws -> (image: MLXArray, thinkIds: [Int32]) {
         let (embeds, indexes, mask, _) = textOnlyInputs(ids: condThinkIds)
         let (cache, logits, maxT) = prefillForDecode(embeds: embeds, indexes: indexes, mask: mask)
-        let (thinkIds, tAfterThink) = generateText(
+        let (thinkIds, tAfterThink) = try generateText(
             cache: cache, firstLogits: logits, startT: maxT,
             stopTokens: [ChatToken.imEnd, ChatToken.thinkEnd],
             forwardStopIntoCache: [ChatToken.thinkEnd],
@@ -207,7 +208,7 @@ extension NEOChatModel {
 
         let needsCFG = params.cfgScale > 1 && uncondIds != nil
         let prefixUncond = needsCFG ? prefillText(uncondIds!) : []
-        let image = t2iDenoise(
+        let image = try t2iDenoise(
             prefixCond: cache.layers, condImageT: tFinal + 1,
             prefixUncond: prefixUncond,
             uncondImageT: needsCFG ? Int32(uncondIds!.count) : 0,

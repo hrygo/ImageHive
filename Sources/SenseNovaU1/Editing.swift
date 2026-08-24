@@ -176,7 +176,7 @@ extension NEOChatModel {
         imgCfgScale: Float = 1.0,
         injectedNoise: MLXArray? = nil,
         onStep: ((Int, Int) -> Void)? = nil
-    ) -> MLXArray {
+    ) throws -> MLXArray {
         let px = config.pixelsPerToken
         let (tokenH, tokenW) = (height / px, width / px)
         let (gridH, gridW) = (height / config.patchSize, width / config.patchSize)
@@ -230,6 +230,7 @@ extension NEOChatModel {
             enable: params.enableTimestepShift)
 
         for step in 0 ..< params.numSteps {
+            try Task.checkCancellation()  // CAN cadence: per denoise step
             let t = timesteps[step]
             let tNext = timesteps[step + 1]
             // it2i interval semantics: exclusive bounds, or lo == 0 (verbatim)

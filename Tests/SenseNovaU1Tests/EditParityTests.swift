@@ -120,7 +120,7 @@ final class EditParityTests: XCTestCase {
             params.timestepShift = 3.0
 
             let t0 = Date()
-            let out = model.it2iGenerate(
+            let out = try model.it2iGenerate(
                 condIds: condIds, imgCondIds: imgCondIds, uncondIds: nil,
                 images: [image], width: 512, height: 512,
                 params: params, imgCfgScale: 1.0, injectedNoise: noise)
