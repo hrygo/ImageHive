@@ -75,7 +75,10 @@ if let question = arg("vqa") {
 let condIds: [Int32]
 let uncondIds: [Int32]?
 var imgCondIds: [Int32]? = nil
-if let prompt = arg("prompt") {
+if arg("convert") != nil {
+    condIds = []
+    uncondIds = nil
+} else if let prompt = arg("prompt") {
     let tok = try await SenseNovaTokenizer.load(from: weights)
     if let img = editImage {
         condIds = tok.encode(Conversation.editCondPrompt(prompt, imageTokenCounts: [img.tokenCount]))
@@ -95,14 +98,30 @@ if let prompt = arg("prompt") {
 
 let loraURL = arg("lora").map { URL(fileURLWithPath: $0) }
 let quantBits = arg("quant").flatMap(Int.init)
-print("[cli] loading model bf16\(loraURL != nil ? " + LoRA" : "")\(quantBits.map { " + q\($0)" } ?? "") ...")
 var t0 = Date()
-let model = try WeightLoading.load(from: weights, dtype: .bfloat16, loraURL: loraURL)
-if let bits = quantBits {
-    let tq = Date()
-    WeightLoading.quantizeStreams(model, bits: bits)
-    MLX.GPU.clearCache()
-    print("[cli] quantized streams to q\(bits) in \(String(format: "%.1f", Date().timeIntervalSince(tq)))s")
+let model: NEOChatModel
+if WeightLoading.isArtifact(weights) {
+    print("[cli] loading OFFLINE ARTIFACT (quant/LoRA baked in) ...")
+    model = try WeightLoading.loadArtifact(from: weights)
+} else {
+    print("[cli] loading model bf16\(loraURL != nil ? " + LoRA" : "")\(quantBits.map { " + q\($0)" } ?? "") ...")
+    model = try WeightLoading.load(from: weights, dtype: .bfloat16, loraURL: loraURL)
+    if let bits = quantBits {
+        let tq = Date()
+        WeightLoading.quantizeStreams(model, bits: bits)
+        MLX.GPU.clearCache()
+        print("[cli] quantized streams to q\(bits) in \(String(format: "%.1f", Date().timeIntervalSince(tq)))s")
+    }
+}
+
+// --- convert mode: save the loaded (merged/quantized) model as an artifact ---
+if let outDir = arg("convert") {
+    print("[cli] load+prep took \(String(format: "%.1f", Date().timeIntervalSince(t0)))s; saving artifact ...")
+    try WeightLoading.saveArtifact(
+        model: model, to: URL(fileURLWithPath: outDir), sourceDir: weights,
+        quantBits: quantBits,
+        loraMergedNote: loraURL.map { $0.deletingPathExtension().lastPathComponent })
+    exit(0)
 }
 print("[cli] loaded in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
 print("[cli] resident after load: \(GPU.activeMemory / (1 << 20)) MB active, peak \(GPU.peakMemory / (1 << 20)) MB")

@@ -111,6 +111,122 @@ public enum WeightLoading {
         return model
     }
 
+    // MARK: - Offline artifacts (mlx-community publish format)
+
+    /// Save the model's CURRENT parameter tree as a self-contained artifact:
+    /// sharded safetensors in OUR key layout (convs NHWC, embedder mlp.0/mlp.1,
+    /// quantized Linears as weight/scales/biases), config.json with the
+    /// `sensenova_swift_artifact` marker (+ mlx-convention `quantization` block
+    /// when quantized), and the tokenizer/aux files copied from the source
+    /// checkpoint. Loading an artifact skips sanitize entirely.
+    public static func saveArtifact(
+        model: NEOChatModel,
+        to outDir: URL,
+        sourceDir: URL,
+        quantBits: Int? = nil,
+        quantGroupSize: Int = 64,
+        loraMergedNote: String? = nil,
+        shardBytes: Int = 5 << 30
+    ) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
+
+        // flatten parameters (already materialized — model is eval'd post-load)
+        let flat = model.parameters().flattened().sorted { $0.0 < $1.0 }
+
+        var shards: [[(String, MLXArray)]] = [[]]
+        var shardSize = 0
+        for (key, value) in flat {
+            let bytes = value.nbytes
+            if shardSize > 0, shardSize + bytes > shardBytes {
+                shards.append([])
+                shardSize = 0
+            }
+            shards[shards.count - 1].append((key, value))
+            shardSize += bytes
+        }
+
+        var weightMap: [String: String] = [:]
+        var total = 0
+        for (i, shard) in shards.enumerated() {
+            let name = String(
+                format: "model-%05d-of-%05d.safetensors", i + 1, shards.count)
+            let dict = Dictionary(uniqueKeysWithValues: shard)
+            try save(arrays: dict, url: outDir.appendingPathComponent(name))
+            for (key, value) in shard {
+                weightMap[key] = name
+                total += value.nbytes
+            }
+            print("[artifact] wrote \(name) (\(shard.count) tensors)")
+        }
+        let index: [String: Any] = [
+            "metadata": ["total_size": total], "weight_map": weightMap,
+        ]
+        try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
+            .write(to: outDir.appendingPathComponent("model.safetensors.index.json"))
+
+        // config: source + markers
+        var config = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: sourceDir.appendingPathComponent("config.json"))) as! [String: Any]
+        config["sensenova_swift_artifact"] = 1
+        if let bits = quantBits {
+            config["quantization"] = ["group_size": quantGroupSize, "bits": bits]
+        }
+        if let note = loraMergedNote { config["lora_merged"] = note }
+        try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys, .prettyPrinted])
+            .write(to: outDir.appendingPathComponent("config.json"))
+
+        for aux in ["tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt",
+                    "added_tokens.json", "special_tokens_map.json"] {
+            let src = sourceDir.appendingPathComponent(aux)
+            let dst = outDir.appendingPathComponent(aux)
+            if fm.fileExists(atPath: src.path) {
+                try? fm.removeItem(at: dst)
+                try fm.copyItem(at: src, to: dst)
+            }
+        }
+        print("[artifact] done -> \(outDir.path) (\(Double(total) / 1e9) GB)")
+    }
+
+    /// True when `directory` holds a Swift artifact (vs the HF checkpoint).
+    public static func isArtifact(_ directory: URL) -> Bool {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("config.json")),
+              let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return cfg["sensenova_swift_artifact"] != nil
+    }
+
+    /// Load an offline artifact: no sanitize, structural quantize when the
+    /// config carries a `quantization` block, then a verified update.
+    /// Peak ≈ resident (no bf16-materialize-then-quantize transient).
+    public static func loadArtifact(from directory: URL) throws -> NEOChatModel {
+        let config = try NEOChatConfig.load(from: directory)
+        let model = NEOChatModel(config)
+
+        let raw = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: directory.appendingPathComponent("config.json"))) as! [String: Any]
+        if let q = raw["quantization"] as? [String: Any],
+           let bits = (q["bits"] as? NSNumber)?.intValue
+        {
+            let group = (q["group_size"] as? NSNumber)?.intValue ?? 64
+            quantizeStreams(model, bits: bits, groupSize: group)
+        }
+
+        var weights: [String: MLXArray] = [:]
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("model-") && $0.pathExtension == "safetensors" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !files.isEmpty else {
+            throw SenseNovaError.badWeights("no artifact shards under \(directory.path)")
+        }
+        for url in files {
+            weights.merge(try loadArrays(url: url)) { _, new in new }
+        }
+        try model.update(parameters: ModuleParameters.unflattened(weights), verify: [.all])
+        eval(model)
+        return model
+    }
+
     /// Quantize the two transformer streams' Linear weights (group 64).
     /// Precision-sensitive small modules stay high precision: embeddings,
     /// lm_head, every norm, both vision patchifies, the FM embedders, and the
