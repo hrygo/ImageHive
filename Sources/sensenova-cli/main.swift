@@ -16,6 +16,10 @@ func arg(_ name: String) -> String? {
     return a[i + 1]
 }
 
+func flag(_ name: String) -> Bool {
+    CommandLine.arguments.contains("--\(name)")
+}
+
 func loadIDs(_ path: String) throws -> [Int32] {
     try MLX.loadArray(url: URL(fileURLWithPath: path)).asType(.int32).asArray(Int32.self)
 }
@@ -90,13 +94,45 @@ if let prompt = arg("prompt") {
 }
 
 let loraURL = arg("lora").map { URL(fileURLWithPath: $0) }
-print("[cli] loading model bf16\(loraURL != nil ? " + LoRA" : "") ...")
+let quantBits = arg("quant").flatMap(Int.init)
+print("[cli] loading model bf16\(loraURL != nil ? " + LoRA" : "")\(quantBits.map { " + q\($0)" } ?? "") ...")
 var t0 = Date()
 let model = try WeightLoading.load(from: weights, dtype: .bfloat16, loraURL: loraURL)
+if let bits = quantBits {
+    let tq = Date()
+    WeightLoading.quantizeStreams(model, bits: bits)
+    MLX.GPU.clearCache()
+    print("[cli] quantized streams to q\(bits) in \(String(format: "%.1f", Date().timeIntervalSince(tq)))s")
+}
 print("[cli] loaded in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
 print("[cli] resident after load: \(GPU.activeMemory / (1 << 20)) MB active, peak \(GPU.peakMemory / (1 << 20)) MB")
 
 t0 = Date()
+// --- think-mode T2I: AR reasoning block, then denoise ---
+if flag("think"), let prompt = arg("prompt"), editImage == nil {
+    let tok = try await SenseNovaTokenizer.load(from: weights)
+    let condThinkIds = tok.encode(
+        Conversation.buildPrompt(
+            userMessage: prompt, systemMessage: Conversation.systemMessageForGen,
+            appendText: "<think>\n"))
+    let uncond = params.cfgScale > 1 ? tok.encode(Conversation.t2iUncondPrompt()) : nil
+    let imgSuffix = tok.encode("\n\n" + Conversation.imgStartToken)
+    print("[cli] think-mode: reasoning ...")
+    let (thinkImage, thinkIds) = model.t2iGenerateThink(
+        condThinkIds: condThinkIds, uncondIds: uncond, imgSuffixIds: imgSuffix,
+        width: width, height: height, params: params
+    ) { _ in
+    } onStep: { step, total in
+        if step % 5 == 0 || step == total {
+            print("[cli] step \(step)/\(total)")
+        }
+    }
+    print("[cli] --- think ---\n\(tok.decode(thinkIds))\n[cli] --- end think ---")
+    eval(thinkImage)
+    try MLX.save(array: thinkImage.asType(.float32), url: URL(fileURLWithPath: outPath))
+    print("[cli] wrote \(outPath)")
+    exit(0)
+}
 let image: MLXArray
 if let img = editImage {
     image = model.it2iGenerate(

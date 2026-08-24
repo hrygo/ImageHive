@@ -110,4 +110,19 @@ public enum WeightLoading {
         eval(model)
         return model
     }
+
+    /// Quantize the two transformer streams' Linear weights (group 64).
+    /// Precision-sensitive small modules stay high precision: embeddings,
+    /// lm_head, every norm, both vision patchifies, the FM embedders, and the
+    /// pixel head — together <3% of bytes (the `keep_hi_precision` doctrine).
+    /// ⚠ Quantized forwards must run on the GPU stream (Metal-only kernels).
+    public static func quantizeStreams(_ model: NEOChatModel, bits: Int, groupSize: Int = 64) {
+        quantize(model: model) { path, module in
+            guard module is Linear else { return nil }
+            guard path.contains("language_model.model.layers.") else { return nil }
+            // every layer Linear: q/k/v/o(_mot_gen), mlp(_mot_gen).{gate,up,down}
+            return (groupSize: groupSize, bits: bits)
+        }
+        eval(model)
+    }
 }
