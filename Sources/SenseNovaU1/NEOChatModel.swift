@@ -193,26 +193,48 @@ public final class NEOChatModel: Module {
         injectedNoise: MLXArray? = nil,
         onStep: ((Int, Int) -> Void)? = nil
     ) -> MLXArray {
+        let needsCFG = params.cfgScale > 1 && uncondIds != nil
+        let prefixCond = prefillText(condIds)
+        let prefixUncond = needsCFG ? prefillText(uncondIds!) : []
+        return t2iDenoise(
+            prefixCond: prefixCond, condImageT: Int32(condIds.count),
+            prefixUncond: prefixUncond,
+            uncondImageT: needsCFG ? Int32(uncondIds!.count) : 0,
+            needsCFG: needsCFG, width: width, height: height, params: params,
+            injectedNoise: injectedNoise, onStep: onStep)
+    }
+
+    /// The shared t2i denoise loop (non-think and think paths).
+    /// `condImageT` / `uncondImageT`: the constant temporal index the image
+    /// tokens carry in each branch (reference: `text_len`, or `maxT + 1` after
+    /// a think phase).
+    func t2iDenoise(
+        prefixCond: [KVPair],
+        condImageT: Int32,
+        prefixUncond: [KVPair],
+        uncondImageT: Int32,
+        needsCFG: Bool,
+        width: Int,
+        height: Int,
+        params: T2IParams,
+        injectedNoise: MLXArray?,
+        onStep: ((Int, Int) -> Void)?
+    ) -> MLXArray {
         let px = config.pixelsPerToken           // 32
         let (tokenH, tokenW) = (height / px, width / px)
         let (gridH, gridW) = (height / config.patchSize, width / config.patchSize)
         let l = tokenH * tokenW
-        let needsCFG = params.cfgScale > 1 && uncondIds != nil
 
-        // -- prefill both branches (und stream) --
-        let prefixCond = prefillText(condIds)
-        let prefixUncond = needsCFG ? prefillText(uncondIds!) : []
-
-        // -- image-token indexes: t = text_len (const), h/w = grid coords --
-        func imageIndexes(textLen: Int) -> THWIndexes {
-            let t = MLXArray([Int32](repeating: Int32(textLen), count: l))
+        // -- image-token indexes: t = const per branch, h/w = grid coords --
+        func imageIndexes(t tVal: Int32) -> THWIndexes {
+            let t = MLXArray([Int32](repeating: tVal, count: l))
             let idx = MLXArray(Int32(0) ..< Int32(l))
             let h = idx.floorDivide(MLXArray(Int32(tokenW)))
             let w = idx % Int32(tokenW)
             return THWIndexes(t: t, h: h, w: w)
         }
-        let idxCond = imageIndexes(textLen: condIds.count)
-        let idxUncond = needsCFG ? imageIndexes(textLen: uncondIds!.count) : idxCond
+        let idxCond = imageIndexes(t: condImageT)
+        let idxUncond = needsCFG ? imageIndexes(t: uncondImageT) : idxCond
 
         // -- init noise --
         let sigma = noiseScale(tokenH: tokenH, tokenW: tokenW)

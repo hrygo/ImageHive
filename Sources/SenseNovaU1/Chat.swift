@@ -112,13 +112,15 @@ extension NEOChatModel {
         onToken: ((Int32) -> Void)? = nil
     ) -> (tokens: [Int32], t: Int32) {
         if params.temperature > 0 { MLXRandom.seed(params.seed) }
+        // reference: `current_index = t_idx` then the forward INCREMENTS before
+        // use — each new token's temporal index is (running max) + 1.
         var t = startT
         var next = sample(firstLogits, params: params)
         var out: [Int32] = []
         for _ in 0 ..< params.maxNewTokens {
             if stopTokens.contains(next) {
                 if forwardStopIntoCache.contains(next) {
-                    _ = decodeStep(token: next, t: t, cache: cache)
+                    _ = decodeStep(token: next, t: t + 1, cache: cache)
                     t += 1
                     out.append(next)
                 }
@@ -126,7 +128,7 @@ extension NEOChatModel {
             }
             out.append(next)
             onToken?(next)
-            let logits = decodeStep(token: next, t: t, cache: cache)
+            let logits = decodeStep(token: next, t: t + 1, cache: cache)
             t += 1
             next = sample(logits, params: params)
         }
@@ -175,6 +177,43 @@ extension NEOChatModel {
             cache: cache, firstLogits: logits, startT: maxT,
             stopTokens: [ChatToken.imEnd], params: params, onToken: onToken)
         return tokens
+    }
+
+    /// Think-mode T2I: AR-generate a `<think>…</think>` block first, append
+    /// `\n\n<img>`, then denoise against the grown cond cache (reference
+    /// `t2i_generate(think_mode=True)` flow).
+    /// - condThinkIds: cond prompt built with `appendText: "<think>\n"`.
+    /// - imgSuffixIds: tokenized `"\n\n<img>"`.
+    public func t2iGenerateThink(
+        condThinkIds: [Int32],
+        uncondIds: [Int32]?,
+        imgSuffixIds: [Int32],
+        width: Int,
+        height: Int,
+        params: T2IParams = T2IParams(),
+        sampling: SamplingParams = SamplingParams(),
+        injectedNoise: MLXArray? = nil,
+        onToken: ((Int32) -> Void)? = nil,
+        onStep: ((Int, Int) -> Void)? = nil
+    ) -> (image: MLXArray, thinkIds: [Int32]) {
+        let (embeds, indexes, mask, _) = textOnlyInputs(ids: condThinkIds)
+        let (cache, logits, maxT) = prefillForDecode(embeds: embeds, indexes: indexes, mask: mask)
+        let (thinkIds, tAfterThink) = generateText(
+            cache: cache, firstLogits: logits, startT: maxT,
+            stopTokens: [ChatToken.imEnd, ChatToken.thinkEnd],
+            forwardStopIntoCache: [ChatToken.thinkEnd],
+            params: sampling, onToken: onToken)
+        let tFinal = appendTextToCache(imgSuffixIds, cache: cache, startT: tAfterThink)
+
+        let needsCFG = params.cfgScale > 1 && uncondIds != nil
+        let prefixUncond = needsCFG ? prefillText(uncondIds!) : []
+        let image = t2iDenoise(
+            prefixCond: cache.layers, condImageT: tFinal + 1,
+            prefixUncond: prefixUncond,
+            uncondImageT: needsCFG ? Int32(uncondIds!.count) : 0,
+            needsCFG: needsCFG, width: width, height: height, params: params,
+            injectedNoise: injectedNoise, onStep: onStep)
+        return (image, thinkIds)
     }
 
     func textOnlyInputs(ids: [Int32]) -> (MLXArray, THWIndexes, MLXArray, Int32) {
