@@ -29,12 +29,23 @@ if let s = arg("seed") { params.seed = UInt64(s)! }
 if let c = arg("cfg") { params.cfgScale = Float(c)! }
 let outPath = arg("out") ?? "sensenova_out.npy"
 
-let condIds = try loadIDs(arg("cond-ids")!)
-let uncondIds = arg("uncond-ids").map { try! loadIDs($0) }
+let condIds: [Int32]
+let uncondIds: [Int32]?
+if let prompt = arg("prompt") {
+    let tok = try await SenseNovaTokenizer.load(from: weights)
+    let pair = tok.t2iIDs(prompt: prompt)
+    condIds = pair.cond
+    uncondIds = params.cfgScale > 1 ? pair.uncond : nil
+    print("[cli] prompt tokenized: \(condIds.count) cond ids\(uncondIds != nil ? ", \(uncondIds!.count) uncond" : " (no CFG)")")
+} else {
+    condIds = try loadIDs(arg("cond-ids")!)
+    uncondIds = arg("uncond-ids").map { try! loadIDs($0) }
+}
 
-print("[cli] loading model bf16 ...")
+let loraURL = arg("lora").map { URL(fileURLWithPath: $0) }
+print("[cli] loading model bf16\(loraURL != nil ? " + LoRA" : "") ...")
 var t0 = Date()
-let model = try WeightLoading.load(from: weights, dtype: .bfloat16)
+let model = try WeightLoading.load(from: weights, dtype: .bfloat16, loraURL: loraURL)
 print("[cli] loaded in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
 print("[cli] resident after load: \(GPU.activeMemory / (1 << 20)) MB active, peak \(GPU.peakMemory / (1 << 20)) MB")
 

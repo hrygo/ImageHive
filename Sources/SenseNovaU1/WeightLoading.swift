@@ -46,11 +46,40 @@ public enum WeightLoading {
         return out
     }
 
+    /// Merge a LoRA file (reference `load_and_merge_lora_weight` semantics:
+    /// `W += (alpha/rank) · up @ down`, fp32 math, cast back) into a raw
+    /// checkpoint-key weight dictionary. The 8-step distill targets only the
+    /// 294 gen-stream projections; every `.lora_down` MUST find its base
+    /// weight or the LoRA doesn't belong to this checkpoint.
+    public static func applyLoRA(
+        to weights: inout [String: MLXArray], lora: [String: MLXArray]
+    ) throws -> Int {
+        var merged = 0
+        for (loraKey, down) in lora where loraKey.hasSuffix(".lora_down.weight") {
+            let base = String(loraKey.dropLast(".lora_down.weight".count))
+            let weightKey = base + ".weight"
+            guard let w = weights[weightKey],
+                  let up = lora[base + ".lora_up.weight"],
+                  let alpha = lora[base + ".alpha"]
+            else {
+                throw SenseNovaError.badWeights(
+                    "LoRA target \(base) has no matching base weight — wrong base checkpoint?")
+            }
+            let rank = Float(down.dim(0))
+            let scale = alpha.asType(.float32).item(Float.self) / rank
+            let delta = matmul(up.asType(.float32), down.asType(.float32)) * scale
+            weights[weightKey] = (w.asType(.float32) + delta).asType(w.dtype)
+            merged += 1
+        }
+        return merged
+    }
+
     /// Load a full NEOChatModel from a checkpoint directory (config.json +
     /// model-*.safetensors). `verify: .all` guarantees every parameter was
-    /// filled and no checkpoint key went unused.
+    /// filled and no checkpoint key went unused. `loraURL` merges an adapter
+    /// (e.g. the 8-step distill) into the base weights before the dtype cast.
     public static func load(
-        from directory: URL, dtype: DType = .bfloat16
+        from directory: URL, dtype: DType = .bfloat16, loraURL: URL? = nil
     ) throws -> NEOChatModel {
         let config = try NEOChatConfig.load(from: directory)
         let model = NEOChatModel(config)
@@ -65,6 +94,15 @@ public enum WeightLoading {
         for url in files {
             let part = try loadArrays(url: url)
             weights.merge(part) { _, new in new }
+        }
+
+        if let loraURL {
+            let lora = try loadArrays(url: loraURL)
+            let merged = try applyLoRA(to: &weights, lora: lora)
+            let expected = lora.keys.filter { $0.hasSuffix(".lora_down.weight") }.count
+            guard merged == expected else {
+                throw SenseNovaError.badWeights("LoRA merged \(merged)/\(expected) targets")
+            }
         }
 
         let sanitized = sanitize(weights, dtype: dtype)
