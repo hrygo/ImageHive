@@ -23,6 +23,15 @@ final class EditParityTests: XCTestCase {
             .appendingPathComponent("sensenova-u1-oracle/fixtures/edit_512x512_s4_bf16")
     }()
 
+    /// `final_image.npy` is capture_edit.py's LAST write — a readiness sentinel.
+    func requireFixtures() throws {
+        if !FileManager.default.fileExists(
+            atPath: Self.fixturesDir.appendingPathComponent("final_image.npy").path)
+        {
+            throw XCTSkip("edit fixtures not captured yet — run capture_edit.py")
+        }
+    }
+
     func fx(_ name: String) throws -> MLXArray {
         try NPY.load(Self.fixturesDir.appendingPathComponent("\(name).npy"))
     }
@@ -49,6 +58,7 @@ final class EditParityTests: XCTestCase {
     }
 
     func testPromptAssembly() throws {
+        try requireFixtures()
         try Device.withDefaultDevice(Device.gpu) {
             let meta = try JSONSerialization.jsonObject(
                 with: Data(contentsOf: Self.fixturesDir.appendingPathComponent("meta.json"))) as! [String: Any]
@@ -70,6 +80,7 @@ final class EditParityTests: XCTestCase {
     }
 
     func testTHWIndexesAndSplice() throws {
+        try requireFixtures()
         try Device.withDefaultDevice(Device.gpu) {
             let model = try SharedTestModel.get()
             let image = try loadRefImage()
@@ -95,6 +106,7 @@ final class EditParityTests: XCTestCase {
     }
 
     func testStepZeroAndFourStepImage() throws {
+        try requireFixtures()
         try Device.withDefaultDevice(Device.gpu) {
             let model = try SharedTestModel.get()
             let image = try loadRefImage()

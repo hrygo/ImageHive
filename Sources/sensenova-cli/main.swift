@@ -42,6 +42,32 @@ if let s = arg("seed") { params.seed = UInt64(s)! }
 if let c = arg("cfg") { params.cfgScale = Float(c)! }
 let outPath = arg("out") ?? "sensenova_out.npy"
 
+// --- VQA mode: --vqa "question" [--edit-image img] → prints the answer ---
+if let question = arg("vqa") {
+    let tok = try await SenseNovaTokenizer.load(from: weights)
+    var userMessage = question
+    var images: [EditImage] = []
+    if let img = editImage {
+        userMessage = Conversation.expandImagePlaceholders(
+            prompt: "<image>\n" + question, imageTokenCounts: [img.tokenCount])
+        images = [img]
+    }
+    let ids = tok.encode(Conversation.buildPrompt(userMessage: userMessage, systemMessage: ""))
+    print("[cli] loading model bf16 ...")
+    let t0v = Date()
+    let model = try WeightLoading.load(from: weights, dtype: .bfloat16)
+    print("[cli] loaded in \(String(format: "%.1f", Date().timeIntervalSince(t0v)))s")
+    var sampling = SamplingParams()
+    sampling.maxNewTokens = Int(arg("max-tokens") ?? "512")!
+    let t1 = Date()
+    var count = 0
+    let answer = model.chat(ids: ids, images: images, params: sampling) { _ in count += 1 }
+    let dt = Date().timeIntervalSince(t1)
+    print("[cli] answer (\(count) tokens, \(String(format: "%.1f", Double(count) / dt)) tok/s):")
+    print(tok.decode(answer))
+    exit(0)
+}
+
 let condIds: [Int32]
 let uncondIds: [Int32]?
 var imgCondIds: [Int32]? = nil

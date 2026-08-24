@@ -25,6 +25,10 @@ public struct SenseNovaTokenizer {
         tokenizer.encode(text: text).map(Int32.init)
     }
 
+    public func decode(_ ids: [Int32]) -> String {
+        tokenizer.decode(tokens: ids.map(Int.init))
+    }
+
     /// The T2I prompt pair (cond with gen system message + think block + <img>,
     /// uncond with no system block).
     public func t2iIDs(prompt: String) -> (cond: [Int32], uncond: [Int32]) {
