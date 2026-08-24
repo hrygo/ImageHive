@@ -1,0 +1,273 @@
+// NEOChatModel.swift — mirrors modeling_neo_chat.py (t2i path first; it2i/edit,
+// think mode, and VQA chat follow in later milestones — see PORTING-SPEC §10).
+//
+// Pixel-space rectified flow: state z lives as 32px patches (channel-LAST,
+// `nhwpqc`); every step the current image is ALSO re-patchified at 16px
+// (channel-FIRST, `nhwcpq`) to feed the gen-stream vision patchify. The head
+// predicts x̂ (clean image), velocity is derived: v = (x̂ − z)/max(1−t, t_eps).
+// Defaults follow the reference CLI, not config.json: shift 3.0, t_eps 0.02,
+// 50 steps, cfg 4.0 (trap ledger #4/#5).
+
+import Foundation
+import MLX
+import MLXNN
+import MLXRandom
+
+public enum CFGNorm: String, Sendable {
+    case none, global, channel, cfgZeroStar
+}
+
+public struct T2IParams: Sendable {
+    public var numSteps = 50
+    public var cfgScale: Float = 4.0
+    public var cfgNorm: CFGNorm = .none
+    public var timestepShift: Float = 3.0
+    public var enableTimestepShift = true
+    public var cfgInterval: (Float, Float) = (0.0, 1.0)
+    public var tEps: Float = 0.02
+    public var seed: UInt64 = 42
+    public init() {}
+}
+
+public final class NEOChatModel: Module {
+    public let config: NEOChatConfig
+
+    @ModuleInfo(key: "vision_model") var visionModel: NEOVisionModel
+    @ModuleInfo(key: "language_model") var languageModel: Qwen3MoTForCausalLM
+    @ModuleInfo(key: "fm_modules") var fmModules: FMModules
+
+    public init(_ config: NEOChatConfig) {
+        self.config = config
+        self._visionModel.wrappedValue = NEOVisionModel(config.vision)
+        self._languageModel.wrappedValue = Qwen3MoTForCausalLM(config.llm)
+        self._fmModules.wrappedValue = FMModules(config)
+        super.init()
+    }
+
+    // MARK: - patchify / unpatchify (pure reshapes; images are NCHW like the reference)
+
+    /// (B, 3, H, W) → (B, L, p²·3), per-patch layout (p, q, c) — `nhwpqc`.
+    public func patchify(_ images: MLXArray, patchSize p: Int) -> MLXArray {
+        let (b, h, w) = (images.dim(0), images.dim(2), images.dim(3))
+        let (gh, gw) = (h / p, w / p)
+        return images.reshaped([b, 3, gh, p, gw, p])
+            .transposed(0, 2, 4, 3, 5, 1)
+            .reshaped([b, gh * gw, p * p * 3])
+    }
+
+    /// (B, 3, H, W) → (B, gh·gw, 3·p²), per-patch layout (c, p, q) — `nhwcpq`.
+    public func patchifyChannelFirst(_ images: MLXArray, patchSize p: Int) -> MLXArray {
+        let (b, h, w) = (images.dim(0), images.dim(2), images.dim(3))
+        let (gh, gw) = (h / p, w / p)
+        return images.reshaped([b, 3, gh, p, gw, p])
+            .transposed(0, 2, 4, 1, 3, 5)
+            .reshaped([b, gh * gw, 3 * p * p])
+    }
+
+    /// inverse of `patchify`: (B, L, p²·3) → (B, 3, H, W).
+    public func unpatchify(_ x: MLXArray, patchSize p: Int, height: Int, width: Int) -> MLXArray {
+        let b = x.dim(0)
+        let (gh, gw) = (height / p, width / p)
+        return x.reshaped([b, gh, gw, p, p, 3])
+            .transposed(0, 5, 1, 3, 2, 4)
+            .reshaped([b, 3, gh * p, gw * p])
+    }
+
+    // MARK: - schedule
+
+    /// `_apply_time_schedule` with the runtime-forced "standard" branch:
+    /// σ = 1−t; σ′ = s·σ / (1 + (s−1)·σ); t′ = 1−σ′.
+    public func shiftedTimesteps(numSteps: Int, shift: Float, enable: Bool) -> [Float] {
+        let linear = (0 ... numSteps).map { Float($0) / Float(numSteps) }
+        guard enable else { return linear }
+        return linear.map { t in
+            let sigma = 1 - t
+            let shifted = shift * sigma / (1 + (shift - 1) * sigma)
+            return 1 - shifted
+        }
+    }
+
+    /// resolution-scaled initial-noise σ: min(√(L/base), max) — merge² cancels
+    /// against the 16px grid exactly as in the reference.
+    public func noiseScale(tokenH: Int, tokenW: Int) -> Float {
+        let l = Float(tokenH * tokenW)
+        let raw = (l / config.noiseScaleBaseImageSeqLen).squareRoot() * config.noiseScale
+        return min(raw, config.noiseScaleMaxValue)
+    }
+
+    // MARK: - prefill
+
+    /// und-stream prefill of a text prompt: returns per-layer KV.
+    /// Text tokens: t = position, h = w = 0; block-causal mask (pure causal here).
+    public func prefillText(_ ids: [Int32]) -> [KVPair] {
+        let s = ids.count
+        let t = MLXArray(ids.indices.map { Int32($0) })
+        let zerosIdx = MLXArray([Int32](repeating: 0, count: s))
+        let indexes = THWIndexes(t: t, h: zerosIdx, w: zerosIdx)
+        let mask = createBlockCausalMask(tIndexes: t)
+        let embeds = languageModel.model.embedTokens(MLXArray(ids).reshaped([1, s]))
+        let (_, kv) = languageModel.model(
+            embeds: embeds, stream: .und, indexes: indexes, mask: mask, collectKV: true)
+        eval(kv.map(\.keys) + kv.map(\.values))
+        return kv
+    }
+
+    // MARK: - denoise core (mirrors `_t2i_predict_v`)
+
+    func predictV(
+        imageEmbeds: MLXArray,      // (B, L, hidden) — gen-vision embeds + time emb
+        indexes: THWIndexes,
+        prefixKV: [KVPair],
+        z: MLXArray,                // (B, L, 3072)
+        t: Float,
+        tokenH: Int,
+        tokenW: Int,
+        tEps: Float
+    ) -> MLXArray {
+        let (hidden, _) = languageModel.model(
+            embeds: imageEmbeds, stream: .gen, indexes: indexes, mask: nil,
+            prefixKV: prefixKV, collectKV: false)
+        let b = hidden.dim(0)
+        let px = config.pixelsPerToken  // 32
+
+        // token grid is NHWC natively for our ConvDecoder
+        let grid = hidden.reshaped([b, tokenH, tokenW, hidden.dim(2)])
+        let img = fmModules.fmHead(grid)  // (B, H, W, 3) NHWC
+        // repack to z layout `b (h w) (p q c)`
+        let xhat = img.reshaped([b, tokenH, px, tokenW, px, 3])
+            .transposed(0, 1, 3, 2, 4, 5)
+            .reshaped([b, tokenH * tokenW, px * px * 3])
+
+        return (xhat - z) / max(1 - t, tEps)
+    }
+
+    // MARK: - CFG combine (mirrors t2i_generate exactly, incl. cfg_zero_star)
+
+    func combineCFG(
+        _ vCond: MLXArray, _ vUncond: MLXArray,
+        cfgScale: Float, norm: CFGNorm, stepIndex: Int
+    ) -> MLXArray {
+        switch norm {
+        case .cfgZeroStar:
+            let b = vCond.dim(0)
+            let pos = vCond.reshaped([b, -1]).asType(.float32)
+            let neg = vUncond.reshaped([b, -1]).asType(.float32)
+            let dot = (pos * neg).sum(axis: 1, keepDims: true)
+            let sq = (neg * neg).sum(axis: 1, keepDims: true) + 1e-8
+            var alpha = (dot / sq).asType(vCond.dtype)
+            alpha = alpha.reshaped([b] + Array(repeating: 1, count: vCond.ndim - 1))
+            if stepIndex <= 0 {
+                return vCond * 0
+            }
+            return vUncond * alpha + cfgScale * (vCond - vUncond * alpha)
+        case .none, .global, .channel:
+            var v = vUncond + cfgScale * (vCond - vUncond)
+            if norm == .global {
+                let nc = MLX.sqrt((vCond.asType(.float32) * vCond.asType(.float32)).sum(axes: [1, 2], keepDims: true))
+                let nv = MLX.sqrt((v.asType(.float32) * v.asType(.float32)).sum(axes: [1, 2], keepDims: true))
+                let scale = clip(nc / (nv + 1e-8), min: 0, max: 1.0).asType(v.dtype)
+                v = v * scale
+            } else if norm == .channel {
+                let nc = MLX.sqrt((vCond.asType(.float32) * vCond.asType(.float32)).sum(axis: -1, keepDims: true))
+                let nv = MLX.sqrt((v.asType(.float32) * v.asType(.float32)).sum(axis: -1, keepDims: true))
+                let scale = clip(nc / (nv + 1e-8), min: 0, max: 1.0).asType(v.dtype)
+                v = v * scale
+            }
+            return v
+        }
+    }
+
+    // MARK: - T2I
+
+    /// Mirrors `t2i_generate` (non-think, batch 1). Token ids come from the
+    /// Conversation builder (or parity fixtures). `injectedNoise` (1,3,H,W),
+    /// already σ-scaled, replaces the RNG for parity runs.
+    /// Returns the final image in generation-normalized space (1, 3, H, W);
+    /// denormalize with `x·0.5 + 0.5`.
+    public func t2iGenerate(
+        condIds: [Int32],
+        uncondIds: [Int32]?,
+        width: Int,
+        height: Int,
+        params: T2IParams = T2IParams(),
+        injectedNoise: MLXArray? = nil,
+        onStep: ((Int, Int) -> Void)? = nil
+    ) -> MLXArray {
+        let px = config.pixelsPerToken           // 32
+        let (tokenH, tokenW) = (height / px, width / px)
+        let (gridH, gridW) = (height / config.patchSize, width / config.patchSize)
+        let l = tokenH * tokenW
+        let needsCFG = params.cfgScale > 1 && uncondIds != nil
+
+        // -- prefill both branches (und stream) --
+        let prefixCond = prefillText(condIds)
+        let prefixUncond = needsCFG ? prefillText(uncondIds!) : []
+
+        // -- image-token indexes: t = text_len (const), h/w = grid coords --
+        func imageIndexes(textLen: Int) -> THWIndexes {
+            let t = MLXArray([Int32](repeating: Int32(textLen), count: l))
+            let idx = MLXArray(Int32(0) ..< Int32(l))
+            let h = idx.floorDivide(MLXArray(Int32(tokenW)))
+            let w = idx % Int32(tokenW)
+            return THWIndexes(t: t, h: h, w: w)
+        }
+        let idxCond = imageIndexes(textLen: condIds.count)
+        let idxUncond = needsCFG ? imageIndexes(textLen: uncondIds!.count) : idxCond
+
+        // -- init noise --
+        let sigma = noiseScale(tokenH: tokenH, tokenW: tokenW)
+        var image: MLXArray
+        if let noise = injectedNoise {
+            image = noise
+        } else {
+            MLXRandom.seed(params.seed)
+            image = (MLXRandom.normal([1, 3, height, width]) * sigma).asType(.bfloat16)
+        }
+
+        let timesteps = shiftedTimesteps(
+            numSteps: params.numSteps, shift: params.timestepShift,
+            enable: params.enableTimestepShift)
+
+        // -- denoise loop --
+        for step in 0 ..< params.numSteps {
+            let t = timesteps[step]
+            let tNext = timesteps[step + 1]
+
+            var z = patchify(image, patchSize: px)
+            let imageInput = patchifyChannelFirst(image, patchSize: config.patchSize)
+                .reshaped([-1, 3 * config.patchSize * config.patchSize])  // reference `.view(B·grid, -1)`
+            var imageEmbeds = fmModules.visionGen(imageInput, gridH: gridH, gridW: gridW)
+                .reshaped([1, l, -1])
+
+            // time (+ noise-scale) conditioning, added to every image token
+            let tExpanded = MLXArray([Float](repeating: t, count: l))
+            var timeEmb = fmModules.timestepEmbedder(tExpanded).reshaped([1, l, -1])
+            if config.addNoiseScaleEmbedding {
+                let ns = MLXArray([Float](repeating: sigma / config.noiseScaleMaxValue, count: l))
+                timeEmb = timeEmb + fmModules.noiseScaleEmbedder(ns).reshaped([1, l, -1])
+            }
+            imageEmbeds = imageEmbeds + timeEmb.asType(imageEmbeds.dtype)
+
+            let vCond = predictV(
+                imageEmbeds: imageEmbeds, indexes: idxCond, prefixKV: prefixCond,
+                z: z, t: t, tokenH: tokenH, tokenW: tokenW, tEps: params.tEps)
+
+            var v = vCond
+            // t2i interval semantics: inclusive bounds (differs from interleave!)
+            if needsCFG, t >= params.cfgInterval.0, t <= params.cfgInterval.1 {
+                let vUncond = predictV(
+                    imageEmbeds: imageEmbeds, indexes: idxUncond, prefixKV: prefixUncond,
+                    z: z, t: t, tokenH: tokenH, tokenW: tokenW, tEps: params.tEps)
+                v = combineCFG(vCond, vUncond, cfgScale: params.cfgScale,
+                               norm: params.cfgNorm, stepIndex: step)
+            }
+
+            z = z + (tNext - t) * v
+            image = unpatchify(z, patchSize: px, height: height, width: width)
+            eval(image)
+            Memory.clearCache()  // long-denoise buffer-cache ratchet discipline
+            onStep?(step + 1, params.numSteps)
+        }
+        return image
+    }
+}
