@@ -44,11 +44,16 @@ final class LivePackageTests: XCTestCase {
         let package = SenseNovaU1Package(
             configuration: .init(variant: .fast8, snapshotPath: snapshot.path))
         try await package.load()
-        defer { Task { await package.unload() } }
-
-        let response = try await package.run(
-            T2IRequest(prompt: "A lighthouse on a cliff at dusk, warm window light",
-                       width: 512, height: 512, seed: 9))
+        let response: any CapabilityResponse
+        do {
+            response = try await package.run(
+                T2IRequest(prompt: "A lighthouse on a cliff at dusk, warm window light",
+                           width: 512, height: 512, seed: 9))
+        } catch {
+            await package.unload()  // deterministic: the next test loads 33 GB
+            throw error
+        }
+        await package.unload()
         guard let t2i = response as? T2IResponse else { return XCTFail("wrong response type") }
         XCTAssertGreaterThan(t2i.image.data.count, 10_000, "suspiciously small PNG")
         let size = decodePNGSize(t2i.image.data)
@@ -64,19 +69,24 @@ final class LivePackageTests: XCTestCase {
         let package = SenseNovaU1Package(
             configuration: .init(variant: .bf16, snapshotPath: snapshot.path))
         try await package.load()
-        defer { Task { await package.unload() } }
-
         let inputURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("sensenova-u1-oracle/renders/sn_1024_s20.png")
         let inputData = try Data(contentsOf: inputURL)
 
-        let response = try await package.run(
-            IEditRequest(
+        let response: any CapabilityResponse
+        do {
+            response = try await package.run(
+                IEditRequest(
                 images: [Image(format: .png, data: inputData, width: 1024, height: 1024)],
-                prompt: "Make the chair emerald green velvet. Preserve everything else.",
-                width: 512, height: 512, steps: 4, seed: 42))
+                    prompt: "Make the chair emerald green velvet. Preserve everything else.",
+                    width: 512, height: 512, steps: 4, seed: 42))
+        } catch {
+            await package.unload()
+            throw error
+        }
+        await package.unload()
         guard let edit = response as? IEditResponse else { return XCTFail("wrong response type") }
         XCTAssertGreaterThan(edit.image.data.count, 10_000)
         let size = decodePNGSize(edit.image.data)

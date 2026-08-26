@@ -131,7 +131,10 @@ public enum WeightLoading {
         let fm = FileManager.default
         try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
 
-        // flatten parameters (already materialized — model is eval'd post-load)
+        // MLX is lazy: an unevaluated tensor serializes as ZEROS with no error.
+        // load()/quantizeStreams() already eval, but this is the public entry
+        // point — materialize unconditionally rather than trusting call order.
+        eval(model)
         let flat = model.parameters().flattened().sorted { $0.0 < $1.0 }
 
         var shards: [[(String, MLXArray)]] = [[]]

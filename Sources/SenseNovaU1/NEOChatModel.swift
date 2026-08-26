@@ -161,19 +161,9 @@ public final class NEOChatModel: Module {
             }
             return vUncond * alpha + cfgScale * (vCond - vUncond * alpha)
         case .none, .global, .channel:
-            var v = vUncond + cfgScale * (vCond - vUncond)
-            if norm == .global {
-                let nc = MLX.sqrt((vCond.asType(.float32) * vCond.asType(.float32)).sum(axes: [1, 2], keepDims: true))
-                let nv = MLX.sqrt((v.asType(.float32) * v.asType(.float32)).sum(axes: [1, 2], keepDims: true))
-                let scale = clip(nc / (nv + 1e-8), min: 0, max: 1.0).asType(v.dtype)
-                v = v * scale
-            } else if norm == .channel {
-                let nc = MLX.sqrt((vCond.asType(.float32) * vCond.asType(.float32)).sum(axis: -1, keepDims: true))
-                let nv = MLX.sqrt((v.asType(.float32) * v.asType(.float32)).sum(axis: -1, keepDims: true))
-                let scale = clip(nc / (nv + 1e-8), min: 0, max: 1.0).asType(v.dtype)
-                v = v * scale
-            }
-            return v
+            let v = vUncond + cfgScale * (vCond - vUncond)
+            guard norm == .global || norm == .channel else { return v }
+            return rescaleToCondNorm(v, vCond, mode: norm)
         }
     }
 
@@ -250,6 +240,18 @@ public final class NEOChatModel: Module {
             numSteps: params.numSteps, shift: params.timestepShift,
             enable: params.enableTimestepShift)
 
+        // sigma is loop-invariant, so the noise-scale embedding is too — compute
+        // it once at the SAME L-row width the reference uses. (Computing it on a
+        // single row and broadcasting is NOT equivalent: MLX dispatches a
+        // different matmul kernel at M=1 and the rounding difference amplifies
+        // through the 42-layer stack — measured e2e cos 0.986 → 0.969.)
+        let noiseEmb: MLXArray? =
+            config.addNoiseScaleEmbedding
+            ? fmModules.noiseScaleEmbedder(
+                MLXArray([Float](repeating: sigma / config.noiseScaleMaxValue, count: l)))
+                .reshaped([1, l, -1])
+            : nil
+
         // -- denoise loop --
         for step in 0 ..< params.numSteps {
             try Task.checkCancellation()  // CAN cadence: per denoise step
@@ -265,10 +267,7 @@ public final class NEOChatModel: Module {
             // time (+ noise-scale) conditioning, added to every image token
             let tExpanded = MLXArray([Float](repeating: t, count: l))
             var timeEmb = fmModules.timestepEmbedder(tExpanded).reshaped([1, l, -1])
-            if config.addNoiseScaleEmbedding {
-                let ns = MLXArray([Float](repeating: sigma / config.noiseScaleMaxValue, count: l))
-                timeEmb = timeEmb + fmModules.noiseScaleEmbedder(ns).reshaped([1, l, -1])
-            }
+            if let noiseEmb { timeEmb = timeEmb + noiseEmb }
             imageEmbeds = imageEmbeds + timeEmb.asType(imageEmbeds.dtype)
 
             let vCond = predictV(

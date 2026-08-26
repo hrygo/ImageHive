@@ -71,10 +71,10 @@ final class EditParityTests: XCTestCase {
                 contentsOf: Self.fixturesDir.appendingPathComponent("imgcond_query.txt"), encoding: .utf8)
 
             XCTAssertEqual(
-                Conversation.editCondPrompt(prompt, imageTokenCounts: [image.tokenCount]),
+                try Conversation.editCondPrompt(prompt, imageTokenCounts: [image.tokenCount]),
                 condRef, "cond query")
             XCTAssertEqual(
-                Conversation.editImgCondPrompt(imageTokenCounts: [image.tokenCount]),
+                try Conversation.editImgCondPrompt(imageTokenCounts: [image.tokenCount]),
                 imgCondRef, "img-cond query")
         }
     }

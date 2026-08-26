@@ -111,6 +111,9 @@ public enum SenseNovaU1PackageError: Error, LocalizedError {
     case imageDecode
     case pngEncode
     case distilledTierCannotEdit
+    case distilledTierCannotThink
+    case negativePromptUnsupportedOnEdit
+    case sizeNotTokenAligned(width: Int, height: Int, multiple: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -119,6 +122,13 @@ public enum SenseNovaU1PackageError: Error, LocalizedError {
         case .pngEncode: return "PNG encoding failed."
         case .distilledTierCannotEdit:
             return "The 8step distill tiers are T2I-only; use the bf16 or 8bit variant for imageEdit."
+        case .distilledTierCannotThink:
+            return "Think mode needs the base tiers; use the bf16 or 8bit variant."
+        case .negativePromptUnsupportedOnEdit:
+            return "negativePrompt is not wired on the edit surface (the branch that would "
+                + "carry it is disabled at imgCfgScale 1); omit it or use textToImage."
+        case .sizeNotTokenAligned(let w, let h, let m):
+            return "width/height must be multiples of \(m) (got \(w)x\(h))."
         }
     }
 }
@@ -253,30 +263,48 @@ public final class SenseNovaU1Package: ModelPackage {
         let width = request.width ?? 1024
         let height = request.height ?? 1024
 
-        let think = { if case .bool(true)? = request.metaData["think"] { return true }; return false }()
+        // token grid is 32 px; a non-multiple silently truncates via integer
+        // division and would make the declared Image size a lie.
+        let px = model.config.pixelsPerToken
+        guard width % px == 0, height % px == 0 else {
+            throw SenseNovaU1PackageError.sizeNotTokenAligned(
+                width: width, height: height, multiple: px)
+        }
+
+        let think: Bool = {
+            switch request.metaData["think"] {
+            case .bool(let b): return b
+            case .string(let raw): return (raw as NSString).boolValue
+            default: return false
+            }
+        }()
+        if think, variant.isDistilled {
+            throw SenseNovaU1PackageError.distilledTierCannotThink
+        }
         let image: MLXArray
-        if think, !variant.isDistilled {
+        if think {
             let condThinkIds = tokenizer.encode(
                 Conversation.buildPrompt(
                     userMessage: request.prompt,
                     systemMessage: Conversation.systemMessageForGen,
                     appendText: "<think>\n"))
             let uncond = params.cfgScale > 1
-                ? tokenizer.encode(Conversation.t2iUncondPrompt()) : nil
+                ? tokenizer.encode(
+                    Conversation.t2iUncondPrompt(negativePrompt: request.negativePrompt ?? ""))
+                : nil
             let suffix = tokenizer.encode("\n\n" + Conversation.imgStartToken)
             (image, _) = try model.t2iGenerateThink(
                 condThinkIds: condThinkIds, uncondIds: uncond, imgSuffixIds: suffix,
                 width: width, height: height, params: params)
         } else {
-            let (cond, uncond) = tokenizer.t2iIDs(prompt: request.prompt)
+            let (cond, uncond) = tokenizer.t2iIDs(
+                prompt: request.prompt, negativePrompt: request.negativePrompt ?? "")
             image = try model.t2iGenerate(
                 condIds: cond, uncondIds: params.cfgScale > 1 ? uncond : nil,
                 width: width, height: height, params: params)
         }
         try Task.checkCancellation()
-        let png = try Self.encodePNG(image)
-        return T2IResponse(
-            image: Image(format: .png, data: png, width: width, height: height))
+        return T2IResponse(image: try Self.pngArtifact(image))
     }
 
     // MARK: - Edit
@@ -285,13 +313,20 @@ public final class SenseNovaU1Package: ModelPackage {
         _ request: IEditRequest, model: NEOChatModel, tokenizer: SenseNovaTokenizer
     ) async throws -> IEditResponse {
         guard !request.images.isEmpty else { throw SenseNovaU1PackageError.imageDecode }
+        if let negative = request.negativePrompt, !negative.isEmpty {
+            throw SenseNovaU1PackageError.negativePromptUnsupportedOnEdit
+        }
         let inputs = try request.images.map {
             try SenseNovaImageIO.loadEditImage(data: $0.data)
         }
         // Output size: explicit wins, else first input's aspect at ~2048² px
         // (reference `_resolve_output_size`).
+        let px = model.config.pixelsPerToken
         let (width, height): (Int, Int)
         if let w = request.width, let h = request.height {
+            guard w % px == 0, h % px == 0 else {
+                throw SenseNovaU1PackageError.sizeNotTokenAligned(width: w, height: h, multiple: px)
+            }
             (width, height) = (w, h)
         } else {
             let target = 2048 * 2048
@@ -307,9 +342,9 @@ public final class SenseNovaU1Package: ModelPackage {
         params.seed = request.seed ?? 0
 
         let counts = inputs.map(\.tokenCount)
-        let condIds = tokenizer.encode(
+        let condIds = try tokenizer.encode(
             Conversation.editCondPrompt(request.prompt, imageTokenCounts: counts))
-        let imgCondIds = tokenizer.encode(
+        let imgCondIds = try tokenizer.encode(
             Conversation.editImgCondPrompt(imageTokenCounts: counts))
 
         let image = try model.it2iGenerate(
@@ -317,12 +352,19 @@ public final class SenseNovaU1Package: ModelPackage {
             images: inputs, width: width, height: height,
             params: params, imgCfgScale: 1.0)
         try Task.checkCancellation()
-        let png = try Self.encodePNG(image)
-        return IEditResponse(
-            image: Image(format: .png, data: png, width: width, height: height))
+        return IEditResponse(image: try Self.pngArtifact(image))
     }
 
     // MARK: - output encoding (canonical PNG artifact, C3)
+
+    /// (1, 3, H, W) tensor → the canonical `Image` artifact, with the declared
+    /// dimensions taken from the TENSOR (never from the request, which may have
+    /// been rounded down by the token grid).
+    nonisolated static func pngArtifact(_ tensor: MLXArray) throws -> Image {
+        Image(
+            format: .png, data: try encodePNG(tensor),
+            width: tensor.dim(3), height: tensor.dim(2))
+    }
 
     /// (1, 3, H, W) generation-normalized tensor → PNG.
     nonisolated static func encodePNG(_ tensor: MLXArray) throws -> Data {

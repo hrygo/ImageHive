@@ -66,8 +66,10 @@ public enum Conversation {
             appendText: "<think>\n\n</think>\n\n" + imgStartToken)
     }
 
-    /// The T2I unconditional (CFG) prompt.
-    public static func t2iUncondPrompt() -> String {
-        buildPrompt(userMessage: "", systemMessage: "", appendText: imgStartToken)
+    /// The T2I unconditional (CFG) prompt. A non-empty `negativePrompt` rides
+    /// the same branch — that IS the CFG negative for this architecture (the
+    /// reference passes an empty user message here).
+    public static func t2iUncondPrompt(negativePrompt: String = "") -> String {
+        buildPrompt(userMessage: negativePrompt, systemMessage: "", appendText: imgStartToken)
     }
 }

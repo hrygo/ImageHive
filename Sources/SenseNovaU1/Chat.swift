@@ -81,7 +81,8 @@ extension NEOChatModel {
         var scaled = flat / params.temperature
         if params.topK > 0 {
             let sorted = MLX.sorted(scaled)  // ascending
-            let cutoff = sorted[sorted.dim(0) - params.topK]
+            let k = min(params.topK, sorted.dim(0))  // a k past the vocab would index negatively
+            let cutoff = sorted[sorted.dim(0) - k]
             scaled = MLX.which(scaled .< cutoff, MLXArray(-Float.infinity), scaled)
         }
         if params.topP < 1.0 {

@@ -31,10 +31,12 @@ public struct SenseNovaTokenizer {
 
     /// The T2I prompt pair (cond with gen system message + think block + <img>,
     /// uncond with no system block).
-    public func t2iIDs(prompt: String) -> (cond: [Int32], uncond: [Int32]) {
+    public func t2iIDs(
+        prompt: String, negativePrompt: String = ""
+    ) -> (cond: [Int32], uncond: [Int32]) {
         (
             encode(Conversation.t2iCondPrompt(prompt)),
-            encode(Conversation.t2iUncondPrompt())
+            encode(Conversation.t2iUncondPrompt(negativePrompt: negativePrompt))
         )
     }
 }

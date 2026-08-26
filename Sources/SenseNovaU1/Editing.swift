@@ -43,9 +43,18 @@ extension Conversation {
     /// then expand each to `<img><IMG_CONTEXT>·n</img>` in order.
     public static func expandImagePlaceholders(
         prompt: String, imageTokenCounts: [Int]
-    ) -> String {
+    ) throws -> String {
         var p = prompt
         let placeholders = p.components(separatedBy: "<image>").count - 1
+        // Reference asserts `len(images) >= prompt.count('<image>')`; without it a
+        // prompt containing a literal "<image>" leaves an unexpanded placeholder
+        // that silently tokenizes as text (no IMG_CONTEXT run, so the splice
+        // preconditions still pass).
+        guard placeholders <= imageTokenCounts.count else {
+            throw SenseNovaError.badConfig(
+                "prompt has \(placeholders) <image> placeholders but only "
+                    + "\(imageTokenCounts.count) image(s) were supplied")
+        }
         if imageTokenCounts.count > placeholders {
             let missing = imageTokenCounts.count - placeholders
             if placeholders == 0 && imageTokenCounts.count > 1 {
@@ -62,16 +71,16 @@ extension Conversation {
     }
 
     /// cond branch: gen system message + prompt-with-images + closed think + <img>
-    public static func editCondPrompt(_ prompt: String, imageTokenCounts: [Int]) -> String {
-        let expanded = expandImagePlaceholders(prompt: prompt, imageTokenCounts: imageTokenCounts)
+    public static func editCondPrompt(_ prompt: String, imageTokenCounts: [Int]) throws -> String {
+        let expanded = try expandImagePlaceholders(prompt: prompt, imageTokenCounts: imageTokenCounts)
         return buildPrompt(
             userMessage: expanded, systemMessage: systemMessageForGen,
             appendText: "<think>\n\n</think>\n\n" + imgStartToken)
     }
 
     /// img-cond branch: images only, default (empty→omitted) system, no think
-    public static func editImgCondPrompt(imageTokenCounts: [Int]) -> String {
-        let expanded = expandImagePlaceholders(
+    public static func editImgCondPrompt(imageTokenCounts: [Int]) throws -> String {
+        let expanded = try expandImagePlaceholders(
             prompt: String(repeating: "<image>", count: imageTokenCounts.count),
             imageTokenCounts: imageTokenCounts)
         return buildPrompt(userMessage: expanded, systemMessage: "", appendText: imgStartToken)
@@ -136,7 +145,12 @@ extension NEOChatModel {
                 if start > cursor {
                     segments.append(tokenEmbeds[0..., cursor ..< start, 0...])
                 }
-                let vit = visionModel(image.pixelValues, gridH: image.gridH, gridW: image.gridW)
+                // Match the conv weight dtype: ImageIO produces fp32 while the
+                // model (and the parity fixtures) are bf16 — without this the
+                // shipped path runs the patchify at a different precision than
+                // the gated one.
+                let pixels = image.pixelValues.asType(visionModel.embeddings.patchEmbedding.weight.dtype)
+                let vit = visionModel(pixels, gridH: image.gridH, gridW: image.gridW)
                 segments.append(vit.reshaped([1, image.tokenCount, -1]).asType(tokenEmbeds.dtype))
                 cursor = i
                 imageIdx += 1
@@ -193,7 +207,10 @@ extension NEOChatModel {
         var prefixImgCond: [KVPair] = []
         var imgCondMaxT: Int32 = 0
         if needsImgCond {
-            guard let imgCondIds else { fatalError("imgCondIds required for cfg=\(params.cfgScale), imgCfg=\(imgCfgScale)") }
+            guard let imgCondIds else {
+                throw SenseNovaError.badConfig(
+                    "imgCondIds required for cfgScale=\(params.cfgScale), imgCfgScale=\(imgCfgScale)")
+            }
             let (e, idx, m, maxT) = buildIT2IInputs(ids: imgCondIds, images: images)
             prefixImgCond = prefillEmbeds(e, indexes: idx, mask: m)
             imgCondMaxT = maxT
@@ -201,7 +218,10 @@ extension NEOChatModel {
         var prefixUncond: [KVPair] = []
         var uncondMaxT: Int32 = 0
         if needsUncond {
-            guard let uncondIds else { fatalError("uncondIds required for imgCfg=\(imgCfgScale)") }
+            guard let uncondIds else {
+                throw SenseNovaError.badConfig(
+                    "uncondIds required for imgCfgScale=\(imgCfgScale)")
+            }
             prefixUncond = prefillText(uncondIds)
             uncondMaxT = Int32(uncondIds.count - 1)
         }
@@ -229,6 +249,15 @@ extension NEOChatModel {
             numSteps: params.numSteps, shift: params.timestepShift,
             enable: params.enableTimestepShift)
 
+        // loop-invariant noise-scale embedding, at the reference's L-row width
+        // (see t2iDenoise for why a 1-row broadcast is not equivalent)
+        let noiseEmb: MLXArray? =
+            config.addNoiseScaleEmbedding
+            ? fmModules.noiseScaleEmbedder(
+                MLXArray([Float](repeating: sigma / config.noiseScaleMaxValue, count: l)))
+                .reshaped([1, l, -1])
+            : nil
+
         for step in 0 ..< params.numSteps {
             try Task.checkCancellation()  // CAN cadence: per denoise step
             let t = timesteps[step]
@@ -244,10 +273,7 @@ extension NEOChatModel {
 
             let tExpanded = MLXArray([Float](repeating: t, count: l))
             var timeEmb = fmModules.timestepEmbedder(tExpanded).reshaped([1, l, -1])
-            if config.addNoiseScaleEmbedding {
-                let ns = MLXArray([Float](repeating: sigma / config.noiseScaleMaxValue, count: l))
-                timeEmb = timeEmb + fmModules.noiseScaleEmbedder(ns).reshaped([1, l, -1])
-            }
+            if let noiseEmb { timeEmb = timeEmb + noiseEmb }
             imageEmbeds = imageEmbeds + timeEmb.asType(imageEmbeds.dtype)
 
             func branch(_ idx: THWIndexes, _ prefix: [KVPair]) -> MLXArray {

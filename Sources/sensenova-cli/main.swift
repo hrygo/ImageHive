@@ -52,14 +52,23 @@ if let question = arg("vqa") {
     var userMessage = question
     var images: [EditImage] = []
     if let img = editImage {
-        userMessage = Conversation.expandImagePlaceholders(
+        userMessage = try Conversation.expandImagePlaceholders(
             prompt: "<image>\n" + question, imageTokenCounts: [img.tokenCount])
         images = [img]
     }
     let ids = tok.encode(Conversation.buildPrompt(userMessage: userMessage, systemMessage: ""))
-    print("[cli] loading model bf16 ...")
     let t0v = Date()
-    let model = try WeightLoading.load(from: weights, dtype: .bfloat16)
+    // Artifact-aware: artifacts are already in our key layout (and may be
+    // quantized), so they must NOT go through sanitize() — re-transposing an
+    // NHWC conv weight fails the verified update.
+    let model: NEOChatModel
+    if WeightLoading.isArtifact(weights) {
+        print("[cli] loading OFFLINE ARTIFACT ...")
+        model = try WeightLoading.loadArtifact(from: weights)
+    } else {
+        print("[cli] loading model bf16 ...")
+        model = try WeightLoading.load(from: weights, dtype: .bfloat16)
+    }
     print("[cli] loaded in \(String(format: "%.1f", Date().timeIntervalSince(t0v)))s")
     var sampling = SamplingParams()
     sampling.maxNewTokens = Int(arg("max-tokens") ?? "512")!
@@ -81,8 +90,8 @@ if arg("convert") != nil {
 } else if let prompt = arg("prompt") {
     let tok = try await SenseNovaTokenizer.load(from: weights)
     if let img = editImage {
-        condIds = tok.encode(Conversation.editCondPrompt(prompt, imageTokenCounts: [img.tokenCount]))
-        imgCondIds = tok.encode(Conversation.editImgCondPrompt(imageTokenCounts: [img.tokenCount]))
+        condIds = try tok.encode(Conversation.editCondPrompt(prompt, imageTokenCounts: [img.tokenCount]))
+        imgCondIds = try tok.encode(Conversation.editImgCondPrompt(imageTokenCounts: [img.tokenCount]))
         uncondIds = nil  // editing default img_cfg == 1 needs no uncond branch
         print("[cli] edit prompt tokenized: \(condIds.count) cond, \(imgCondIds!.count) img-cond ids")
     } else {
