@@ -162,18 +162,29 @@ public final class SenseNovaU1Package: ModelPackage {
                 // co-residency to other models. The totals happened to match,
                 // which is exactly why only the split shows the error.
                 //
-                // bf16 / int4 remain CLI-derived (MLX accounting, which reads
-                // ~1 GB under phys for this model) and are NOT yet in-app
-                // validated — their resident figures carry that known bias.
+                // 2026-08-26: ALL FOUR tiers now measured headless, one process
+                // per number (in-process residue makes back-to-back runs
+                // unusable), with the pre-load baseline captured so `resident`
+                // is weights and not process overhead — it measured 0.01 GB, so
+                // floor IS weights here. bf16 and int4 were under-declared by
+                // ~3.3% against the CLI-derived figures and are corrected:
+                // bf16 35.17 GB measured (was 34.0), int4 11.87 (was 11.5).
+                // int8 measured 19.98 against 20.5 declared — left alone, since
+                // over-declaring resident is the safe direction.
+                //
+                // Activations are LEFT AS DECLARED. Measured T2I peaks at the
+                // 2048² envelope are 2.93 / 3.35 / 2.52 GB, comfortably inside
+                // 4.0 / 4.2 / 4.5 — but editing adds vision-token activation and
+                // has NOT been measured, so the headroom stays until it is.
                 footprints: [
                     QuantFootprint(
-                        quant: .bf16, residentBytes: 34_000_000_000,
+                        quant: .bf16, residentBytes: 35_500_000_000,
                         peakActivationBytes: 4_000_000_000),
                     QuantFootprint(
                         quant: .int8, residentBytes: 20_500_000_000,
                         peakActivationBytes: 4_200_000_000),
                     QuantFootprint(
-                        quant: .int4, residentBytes: 11_500_000_000,
+                        quant: .int4, residentBytes: 12_200_000_000,
                         peakActivationBytes: 4_500_000_000),
                 ],
                 requiredBackends: [.metalGPU],
