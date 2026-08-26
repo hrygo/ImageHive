@@ -30,7 +30,7 @@ final class ConformanceTests: XCTestCase {
         }
 
         let caps = Set(m.surfaces.map(\.capability))
-        XCTAssertEqual(caps, [.textToImage, .imageEdit])
+        XCTAssertEqual(caps, [.textToImage, .imageEdit, .imageAnalysis])
     }
 
     /// The split-provenance rule: fetch address = OUR namespace, origin = theirs,

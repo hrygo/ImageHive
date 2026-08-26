@@ -56,7 +56,8 @@ if let question = arg("vqa") {
             prompt: "<image>\n" + question, imageTokenCounts: [img.tokenCount])
         images = [img]
     }
-    let ids = tok.encode(Conversation.buildPrompt(userMessage: userMessage, systemMessage: ""))
+    let ids = tok.encode(
+        Conversation.vqaPrompt(userMessage: userMessage, think: flag("think")))
     let t0v = Date()
     // Artifact-aware: artifacts are already in our key layout (and may be
     // quantized), so they must NOT go through sanitize() — re-transposing an
@@ -77,7 +78,9 @@ if let question = arg("vqa") {
     let answer = try model.chat(ids: ids, images: images, params: sampling) { _ in count += 1 }
     let dt = Date().timeIntervalSince(t1)
     print("[cli] answer (\(count) tokens, \(String(format: "%.1f", Double(count) / dt)) tok/s):")
-    print(tok.decode(answer))
+    let (text, reasoning) = Conversation.splitReasoning(tok.decode(answer))
+    if let reasoning { print("--- reasoning ---\n\(reasoning)\n--- answer ---") }
+    print(text)
     exit(0)
 }
 

@@ -114,6 +114,8 @@ public enum SenseNovaU1PackageError: Error, LocalizedError {
     case distilledTierCannotThink
     case negativePromptUnsupportedOnEdit
     case sizeNotTokenAligned(width: Int, height: Int, multiple: Int)
+    case distilledTierCannotAnalyze
+    case metaDataOutOfRange(key: String, value: Double, range: ClosedRange<Double>)
 
     public var errorDescription: String? {
         switch self {
@@ -129,6 +131,10 @@ public enum SenseNovaU1PackageError: Error, LocalizedError {
                 + "carry it is disabled at imgCfgScale 1); omit it or use textToImage."
         case .sizeNotTokenAligned(let w, let h, let m):
             return "width/height must be multiples of \(m) (got \(w)x\(h))."
+        case .distilledTierCannotAnalyze:
+            return "VQA needs the understanding stream of a base tier; use bf16 or 8bit."
+        case .metaDataOutOfRange(let key, let value, let range):
+            return "metaData \(key) = \(value) is outside \(range.lowerBound)...\(range.upperBound)."
         }
     }
 }
@@ -181,8 +187,17 @@ public final class SenseNovaU1Package: ModelPackage {
                 IEditContract.descriptor(
                     name: "sensenova-u1-edit",
                     summary: "Identity-preserving instruction editing on the same "
-                        + "resident model (image-conditioned generation, cfg 4 + "
-                        + "image-cfg 1; base bf16/8bit tiers).",
+                        + "resident model (image-conditioned generation, cfg 4; "
+                        + "metaData imageGuidance (1...4) adds the image-CFG axis; "
+                        + "base bf16/8bit tiers).",
+                    modes: []
+                ),
+                ImageAnalysisContract.descriptor(
+                    name: "sensenova-u1-vqa",
+                    summary: "Visual question answering on the SAME resident model "
+                        + "(understanding stream): grounded description, reading, and "
+                        + "reasoning about an image. metaData: maxTokens, temperature. "
+                        + "Base bf16/8bit tiers.",
                     modes: []
                 ),
             ]
@@ -192,6 +207,34 @@ public final class SenseNovaU1Package: ModelPackage {
     private let configuration: Configuration
     private var model: NEOChatModel?
     private var tokenizer: SenseNovaTokenizer?
+
+    /// metaData is caller-supplied and may arrive typed (native clients) or as
+    /// strings (JSON tool-calling), so every reader accepts both.
+    nonisolated static func number(
+        _ metaData: MetaData, _ key: String, in range: ClosedRange<Double>
+    ) throws -> Double? {
+        let raw: Double?
+        switch metaData[key] {
+        case .double(let d): raw = d
+        case .int(let i): raw = Double(i)
+        case .string(let s): raw = Double(s)
+        default: raw = nil
+        }
+        guard let value = raw else { return nil }
+        guard range.contains(value) else {
+            throw SenseNovaU1PackageError.metaDataOutOfRange(key: key, value: value, range: range)
+        }
+        return value
+    }
+
+    nonisolated static func flag(_ metaData: MetaData, _ key: String) -> Bool {
+        switch metaData[key] {
+        case .bool(let b): return b
+        case .string(let s): return (s as NSString).boolValue
+        case .int(let i): return i != 0
+        default: return false
+        }
+    }
 
     public nonisolated init(configuration: Configuration) {
         self.configuration = configuration
@@ -237,6 +280,14 @@ public final class SenseNovaU1Package: ModelPackage {
                 throw PackageError.unsupportedCapability(request.capability)
             }
             return try await runT2I(t2i, model: model, tokenizer: tokenizer)
+        case .imageAnalysis:
+            guard let analysis = request as? ImageAnalysisRequest else {
+                throw PackageError.unsupportedCapability(request.capability)
+            }
+            guard !configuration.variant.isDistilled else {
+                throw SenseNovaU1PackageError.distilledTierCannotAnalyze
+            }
+            return try await runAnalysis(analysis, model: model, tokenizer: tokenizer)
         case .imageEdit:
             guard let edit = request as? IEditRequest else {
                 throw PackageError.unsupportedCapability(request.capability)
@@ -247,6 +298,15 @@ public final class SenseNovaU1Package: ModelPackage {
             return try await runEdit(edit, model: model, tokenizer: tokenizer)
         default:
             throw PackageError.unsupportedCapability(request.capability)
+        }
+    }
+
+    /// Contract 1.18: report at the same seams the CAN checkpoints sit on, so a
+    /// consumer bound to `engine.runProgress` sees a live step counter instead of
+    /// an indeterminate spinner for the length of a 2048² render.
+    nonisolated static var denoiseReporter: (Int, Int) -> Void {
+        { step, totalSteps in
+            RunProgress.report(.denoise, step: step, totalSteps: totalSteps)
         }
     }
 
@@ -293,15 +353,22 @@ public final class SenseNovaU1Package: ModelPackage {
                     Conversation.t2iUncondPrompt(negativePrompt: request.negativePrompt ?? ""))
                 : nil
             let suffix = tokenizer.encode("\n\n" + Conversation.imgStartToken)
+            var thinkTokens = 0
             (image, _) = try model.t2iGenerateThink(
                 condThinkIds: condThinkIds, uncondIds: uncond, imgSuffixIds: suffix,
-                width: width, height: height, params: params)
+                width: width, height: height, params: params,
+                onToken: { _ in
+                    thinkTokens += 1
+                    RunProgress.report(.generate, step: thinkTokens)
+                },
+                onStep: Self.denoiseReporter)
         } else {
             let (cond, uncond) = tokenizer.t2iIDs(
                 prompt: request.prompt, negativePrompt: request.negativePrompt ?? "")
             image = try model.t2iGenerate(
                 condIds: cond, uncondIds: params.cfgScale > 1 ? uncond : nil,
-                width: width, height: height, params: params)
+                width: width, height: height, params: params,
+                onStep: Self.denoiseReporter)
         }
         try Task.checkCancellation()
         return T2IResponse(image: try Self.pngArtifact(image))
@@ -341,18 +408,66 @@ public final class SenseNovaU1Package: ModelPackage {
         params.cfgScale = request.guidanceScale.map(Float.init) ?? 4.0
         params.seed = request.seed ?? 0
 
+        // The image-CFG axis (the reference's `img_cfg_scale`, the Space's
+        // "Image Guidance"): at 1.0 the uncond branch is unused; above it the
+        // three-branch combine needs an empty-prompt prefix too.
+        let imgCfgScale = Float(
+            try Self.number(request.metaData, "imageGuidance", in: 1.0...4.0) ?? 1.0)
+
         let counts = inputs.map(\.tokenCount)
         let condIds = try tokenizer.encode(
             Conversation.editCondPrompt(request.prompt, imageTokenCounts: counts))
         let imgCondIds = try tokenizer.encode(
             Conversation.editImgCondPrompt(imageTokenCounts: counts))
+        let uncondIds: [Int32]? =
+            imgCfgScale > 1
+            ? tokenizer.encode(Conversation.t2iUncondPrompt()) : nil
 
         let image = try model.it2iGenerate(
-            condIds: condIds, imgCondIds: imgCondIds, uncondIds: nil,
+            condIds: condIds, imgCondIds: imgCondIds, uncondIds: uncondIds,
             images: inputs, width: width, height: height,
-            params: params, imgCfgScale: 1.0)
+            params: params, imgCfgScale: imgCfgScale,
+            onStep: Self.denoiseReporter)
         try Task.checkCancellation()
         return IEditResponse(image: try Self.pngArtifact(image))
+    }
+
+    // MARK: - VQA
+
+    private func runAnalysis(
+        _ request: ImageAnalysisRequest, model: NEOChatModel, tokenizer: SenseNovaTokenizer
+    ) async throws -> ImageAnalysisResponse {
+        let image = try SenseNovaImageIO.loadEditImage(data: request.image.data)
+
+        var sampling = SamplingParams()
+        sampling.maxNewTokens = Int(
+            try Self.number(request.metaData, "maxTokens", in: 1...4096) ?? 512)
+        sampling.temperature = Float(
+            try Self.number(request.metaData, "temperature", in: 0...2) ?? 0)
+        sampling.seed = request.metaData["seed"].flatMap {
+            if case .int(let i) = $0 { return UInt64(max(0, i)) }
+            return nil
+        } ?? 0
+
+        let wantsReasoning = Self.flag(request.metaData, "think")
+        let userMessage = try Conversation.expandImagePlaceholders(
+            prompt: "<image>\n" + request.prompt, imageTokenCounts: [image.tokenCount])
+        let ids = tokenizer.encode(
+            Conversation.vqaPrompt(userMessage: userMessage, think: wantsReasoning))
+
+        var produced = 0
+        let answer = try model.chat(ids: ids, images: [image], params: sampling) { _ in
+            produced += 1
+            RunProgress.report(.generate, step: produced, totalSteps: sampling.maxNewTokens)
+        }
+        try Task.checkCancellation()
+        // The canonical text is the ANSWER; a think block is never it. Callers
+        // that want the deliberation ask for it (metaData includeReasoning).
+        let (text, reasoning) = Conversation.splitReasoning(tokenizer.decode(answer))
+        if Self.flag(request.metaData, "includeReasoning"), let reasoning {
+            return ImageAnalysisResponse(text: "<think>\n\(reasoning)\n</think>\n\n\(text)")
+        }
+        return ImageAnalysisResponse(text: text)
     }
 
     // MARK: - output encoding (canonical PNG artifact, C3)

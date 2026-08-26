@@ -66,6 +66,32 @@ public enum Conversation {
             appendText: "<think>\n\n</think>\n\n" + imgStartToken)
     }
 
+    /// VQA / chat prompt. The model reasons by default and emits a
+    /// `<think>…</think>` block that consumes the token budget before the answer
+    /// (measured: 200 tokens of deliberation, answer truncated). Pre-closing the
+    /// block — the same convention the reference uses for non-think T2I — makes
+    /// the model answer immediately. `think: true` restores deliberation.
+    public static func vqaPrompt(userMessage: String, think: Bool = false) -> String {
+        buildPrompt(
+            userMessage: userMessage, systemMessage: "",
+            appendText: think ? "" : "<think>\n\n</think>\n\n")
+    }
+
+    /// Split a raw decode into (answer, reasoning) — the model's think block is
+    /// never the answer, so the canonical text must not carry it.
+    public static func splitReasoning(_ raw: String) -> (answer: String, reasoning: String?) {
+        guard let close = raw.range(of: "</think>") else {
+            return (raw.trimmingCharacters(in: .whitespacesAndNewlines), nil)
+        }
+        let head = raw[raw.startIndex ..< close.lowerBound]
+        let reasoning = head
+            .replacingOccurrences(of: "<think>", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let answer = String(raw[close.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (answer, reasoning.isEmpty ? nil : reasoning)
+    }
+
     /// The T2I unconditional (CFG) prompt. A non-empty `negativePrompt` rides
     /// the same branch — that IS the CFG negative for this architecture (the
     /// reference passes an empty user message here).
