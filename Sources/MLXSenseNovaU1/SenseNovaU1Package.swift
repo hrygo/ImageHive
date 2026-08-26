@@ -150,20 +150,28 @@ public final class SenseNovaU1Package: ModelPackage {
                 sourceRepo: "sensenova/SenseNova-U1.5-8B-MoT",
                 revision: "07d76f61474b9c6e6999e22c559314d3439b8c81", tier: 3),
             requirements: RequirementsManifest(
-                // Split footprints measured on the OFFLINE ARTIFACTS (M5 Max,
-                // sensenova-cli, 2048² envelope; artifact load has no
-                // materialize-then-quantize transient, so peak ≈ resident):
-                //   bf16 resident 33.4 GB, worst peak 35.1 → activation 1.7 GB
-                //   int8 resident 19.0 GB, worst peak 22.9 → activation 3.9 GB
-                //   int4 resident 11.2 GB, worst peak 14.8 → activation 3.6 GB
-                // Declared with headroom. AB-R-0137 / PORTING-SPEC status.
+                // Split footprints, 2048² envelope, M5 Max.
+                //
+                // int8 is RE-BASELINED from in-app `phys_footprint` (SenseNova
+                // Demo, Engine pane): floor 19.97 GB measured post-load with the
+                // MLX pool trimmed, worst peak 23.5 GB over a cold+warm pair ⇒
+                // activation 3.53 GB. The previous split (19.5 / 5.0) was wrong
+                // in BOTH directions at once — under-declaring the persistent
+                // floor the governor reserves for the model's lifetime while
+                // over-declaring the transient by 1.4×, which needlessly denies
+                // co-residency to other models. The totals happened to match,
+                // which is exactly why only the split shows the error.
+                //
+                // bf16 / int4 remain CLI-derived (MLX accounting, which reads
+                // ~1 GB under phys for this model) and are NOT yet in-app
+                // validated — their resident figures carry that known bias.
                 footprints: [
                     QuantFootprint(
                         quant: .bf16, residentBytes: 34_000_000_000,
                         peakActivationBytes: 4_000_000_000),
                     QuantFootprint(
-                        quant: .int8, residentBytes: 19_500_000_000,
-                        peakActivationBytes: 5_000_000_000),
+                        quant: .int8, residentBytes: 20_500_000_000,
+                        peakActivationBytes: 4_200_000_000),
                     QuantFootprint(
                         quant: .int4, residentBytes: 11_500_000_000,
                         peakActivationBytes: 4_500_000_000),
