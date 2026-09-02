@@ -22,5 +22,7 @@ as adaptations of the source work.
 
 They are the held-out **validation** subject of the pose corpus, which is
 Wikimedia-Commons-only and publishable by construction. The corpus's *training*
-split additionally contains Pexels-sourced frames that are **train-only** and
-are not reproduced anywhere in this repository.
+split additionally contains Pexels-sourced frames: the Pexels License permits
+training and forbids redistributing the frames, so those are **train-only** and
+are not reproduced anywhere in this repository. Trained weights are unaffected
+by that restriction.

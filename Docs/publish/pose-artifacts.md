@@ -1,8 +1,8 @@
 # Publishing the pose artifacts — prepared, NOT pushed
 
-Both artifacts are built, gated and staged locally. **Nothing has been uploaded.**
-Pushing them is an outward action and needs the operator's go-ahead, and there is
-one licence question below that has to be answered first.
+Both artifacts are built, gated and staged locally. **Nothing has been uploaded**
+— pushing 55 GB to a public hub is an outward action and takes the operator's
+go-ahead. The licence question that used to sit here is settled (below).
 
 Staged at `/Volumes/Satechi/Development/mlxengine-image/weights/artifacts/`:
 
@@ -11,30 +11,35 @@ Staged at `/Volumes/Satechi/Development/mlxengine-image/weights/artifacts/`:
 | `SenseNova-U1.5-8B-MoT-pose-8bit` | 19.9 GB, 4 shards | `mlx-community/SenseNova-U1.5-8B-MoT-pose-8bit` |
 | `SenseNova-U1.5-8B-MoT-pose-bf16` | 35.1 GB, 7 shards | `mlx-community/SenseNova-U1.5-8B-MoT-pose-bf16` |
 
-## ⚠ Decide this before pushing: the training corpus, not the checkpoint
+## Training corpus — settled, not a blocker
 
-The base checkpoint is Apache-2.0 and the port is MIT — both clean. The **adapter**
-is the open question. Its training split is 104 identities, of which **78 are
-Pexels-sourced and marked train-only**: the Pexels License forbids redistributing
-the photos and videos themselves, and the corpus docs state plainly that AI
-training "is not addressed by the Pexels License (neither granted nor denied) —
-fine for an internal LoRA; weigh before distributing weights trained on it."
+The base checkpoint is Apache-2.0 and the port is MIT. The adapter's training
+split is 78 of 104 identities Pexels-sourced; the standing fleet posture on that,
+confirmed by the operator 2026-09-02, is:
 
-Publishing these artifacts distributes **weights trained on that material**, which
-is the exact case that note defers. This is AB-L-0082 territory: a permissive
-checkpoint licence says nothing about the corpus. Three ways out, for the
-operator to pick:
+> **The Pexels License permits commercial use and forbids redistributing the
+> frames. Training on them is fine and the trained WEIGHTS are distributable —
+> what must never be published is the dataset.**
 
-1. **Publish as-is** with the corpus composition stated on the card (the position
-   that model weights are not a redistribution of the training images).
-2. **Publish to `xocialize/` rather than `mlx-community/`** — same durability
-   guarantee for our own `WeightSourcing`, without putting a corpus-ambiguous
-   merge into the community namespace. (The variant's `repo` string changes with it.)
-3. **Retrain on the Commons-only split** and publish that, keeping the
-   Pexels-augmented adapter internal.
+It is stated the same way in `WardrobeLoRADev/SCOPING.md` ("we keep frames
+internal and publish only weights"; "published artifact = weights only,
+Apache-2.0") and in the corpus README's own licence summary. `PEXELS-SOURCING.md`
+still carries an older "weigh before distributing weights trained on it" hedge
+that predates the call — read the decision record, not the hedge.
 
-Nothing else about the tier is blocked by this — the artifacts work locally today
-via `snapshotPath`.
+**What that means here, concretely:**
+
+- Publishing `SenseNova-U1.5-8B-MoT-pose-{8bit,bf16}` is **clear**. The artifacts
+  are merged weights; no Pexels frame is contained in or recoverable from them.
+- The **corpus** stays unpublished — no `train/*/px_*` file leaves the
+  workstream, and the artifact cards do not link one.
+- The receipt images in this repository are Commons-only val fixtures with their
+  attribution recorded (`Docs/receipts/pose-gates/NOTICE.md`).
+
+The one thing still open is the **namespace**: `mlx-community/` (what
+`SenseNovaVariant.repo` declares today, matching the four existing tiers) or
+`xocialize/`. Both satisfy the durability rule that a shipped `WeightSource`
+points at a namespace we control.
 
 ## Card (identical for both, with the tier line swapped)
 

@@ -20,7 +20,7 @@ All three capabilities run locally on a Mac:
 
 `8step` artifacts have the official [8-step distillation LoRA](https://huggingface.co/xocialize/SenseNova-U1.5-8B-MoT-LoRAs) pre-merged and run **cfg-free** (single forward per step) — use them for fast T2I. Use `bf16`/`8bit` for 50-step quality T2I, **editing**, VQA, and think mode. Per the fleet quantization doctrine for diffusion paths, **8-bit reproduces the bf16 image (cos 0.998); 4-bit is a declared opt-in tier** that produces a different-but-equally-valid draw (cos ~0.92 at fixed seed).
 
-`pose` artifacts are a **base-checkpoint merge, not a distill** — see [Pose transfer](#pose-transfer-the-pose-tiers) below. Every surface stays enabled on them; a 768² two-reference edit runs in **20.2 s at 0.72 s/step**, 2.6 s to load, 19.0 GB resident. Publication is pending an operator decision (`Docs/publish/pose-artifacts.md`).
+`pose` artifacts are a **base-checkpoint merge, not a distill** — see [Pose transfer](#pose-transfer-the-pose-tiers) below. Every surface stays enabled on them; a 768² two-reference edit runs in **20.2 s at 0.72 s/step**, 2.6 s to load, 19.0 GB resident. Publication is staged and licence-clear; only the upload itself is outstanding (`Docs/publish/pose-artifacts.md`).
 
 ## Quick start (CLI)
 
