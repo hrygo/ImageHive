@@ -16,11 +16,12 @@ All three capabilities run locally on a Mac:
 | [`SenseNova-U1.5-8B-MoT-8step-8bit`](https://huggingface.co/mlx-community/SenseNova-U1.5-8B-MoT-8step-8bit) | 22.4 GB | 3.8 s | 19.5 s |
 | [`SenseNova-U1.5-8B-MoT-8bit`](https://huggingface.co/mlx-community/SenseNova-U1.5-8B-MoT-8bit) | 22.9 GB | ~7.4 s (cfg 4) | — |
 | [`SenseNova-U1.5-8B-MoT-bf16`](https://huggingface.co/mlx-community/SenseNova-U1.5-8B-MoT-bf16) | 35.1 GB | ~6.6 s (cfg 4) | ~40 s (cfg 4) |
-| `SenseNova-U1.5-8B-MoT-pose-8bit` *(staged, not yet published)* | 22.5 GB | — | — |
+| [`SenseNova-U1.5-8B-MoT-pose-8bit`](https://huggingface.co/mlx-community/SenseNova-U1.5-8B-MoT-pose-8bit) | 22.5 GB | — | — |
+| [`SenseNova-U1.5-8B-MoT-pose-bf16`](https://huggingface.co/mlx-community/SenseNova-U1.5-8B-MoT-pose-bf16) | 35.1 GB | — | — |
 
 `8step` artifacts have the official [8-step distillation LoRA](https://huggingface.co/xocialize/SenseNova-U1.5-8B-MoT-LoRAs) pre-merged and run **cfg-free** (single forward per step) — use them for fast T2I. Use `bf16`/`8bit` for 50-step quality T2I, **editing**, VQA, and think mode. Per the fleet quantization doctrine for diffusion paths, **8-bit reproduces the bf16 image (cos 0.998); 4-bit is a declared opt-in tier** that produces a different-but-equally-valid draw (cos ~0.92 at fixed seed).
 
-`pose` artifacts are a **base-checkpoint merge, not a distill** — see [Pose transfer](#pose-transfer-the-pose-tiers) below. Every surface stays enabled on them; a 768² two-reference edit runs in **20.2 s at 0.72 s/step**, 2.6 s to load, 19.0 GB resident. Publication is staged and licence-clear; only the upload itself is outstanding (`Docs/publish/pose-artifacts.md`).
+`pose` artifacts are a **base-checkpoint merge, not a distill** — see [Pose transfer](#pose-transfer-the-pose-tiers) below. Every surface stays enabled on them; a 768² two-reference edit runs in **20.2 s at 0.72 s/step**, 2.6 s to load, 19.0 GB resident. Published 2026-09-02 and verified against a fresh download (`Docs/publish/pose-artifacts.md`).
 
 ## Quick start (CLI)
 

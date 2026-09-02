@@ -1,8 +1,8 @@
-# Publishing the pose artifacts — prepared, NOT pushed
+# Publishing the pose artifacts — PUBLISHED 2026-09-02
 
-Both artifacts are built, gated and staged locally. **Nothing has been uploaded**
-— pushing 55 GB to a public hub is an outward action and takes the operator's
-go-ahead. The licence question that used to sit here is settled (below).
+Both artifacts are live on the hub under `mlx-community/`, uploaded 2026-09-02
+with the operator's go-ahead and verified against a fresh download. This file is
+kept as the procedure and the licence record.
 
 Staged at `/Volumes/Satechi/Development/mlxengine-image/weights/artifacts/`:
 
@@ -120,11 +120,24 @@ hf upload mlx-community/SenseNova-U1.5-8B-MoT-pose-bf16 \
   . --repo-type model
 ```
 
-## After the upload — PUBLISHED-ARTIFACT VERIFIED
+## PUBLISHED-ARTIFACT VERIFIED — 2026-09-02, both tiers ✅
 
-The staged bytes passing a gate is not evidence the published bytes do (the LaMa
-lesson). Download the repo fresh into a throwaway directory and re-run the gate on
-what came back:
+Staged bytes passing a gate is not evidence the published bytes do (the LaMa
+lesson), so both repos were downloaded fresh and re-gated on what came back.
+
+| check | pose-8bit | pose-bf16 |
+|---|---|---|
+| upload | 19.9 GB, commit `1592e332` | 35.1 GB, commit `1c36004e` |
+| repo public, ungated, apache-2.0 | ✅ | ✅ |
+| fresh download vs staged, tensor by tensor | ✅ 2292 / 2292 identical | ✅ 1116 / 1116 identical |
+| live two-reference render on the DOWNLOADED bytes | ✅ 48 s | — |
+
+The render check is the strong one: `testLivePoseEditTwoReference` run against
+the downloaded copy left every file in `Docs/receipts/pose-gates/` unchanged in
+`git status`, so the published weights produce the same image, byte for byte, as
+the ones every gate above was written against.
+
+The procedure, to repeat it or to run it for the next artifact:
 
 ```bash
 hf download mlx-community/SenseNova-U1.5-8B-MoT-pose-8bit --local-dir /tmp/pose-verify
@@ -133,6 +146,3 @@ sensenova-cli --diff-artifacts \
   --diff-artifacts /tmp/pose-verify
 SENSENOVA_LIVE_PKG=1 SENSENOVA_ARTIFACTS=/tmp swift test --filter testLivePoseEditTwoReference
 ```
-
-Then flip the `pose-8bit` row in the README's table to a hub link, and update the
-registry row's availability.

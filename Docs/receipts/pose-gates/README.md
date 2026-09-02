@@ -144,6 +144,13 @@ render path, and the multi-image plumbing added to the CLI does not diverge
 from what the engine drives. The two PNG files differ in size only because
 CoreGraphics and PIL encode PNG differently.
 
+## (e) Published-artifact verification
+
+Both tiers were uploaded to `mlx-community/` on 2026-09-02 and re-gated on a
+fresh download: 2292/2292 (8-bit) and 1116/1116 (bf16) tensors identical to the
+staged copies, and the live two-reference render on the DOWNLOADED bytes left
+every PNG in this directory unchanged. Detail in `Docs/publish/pose-artifacts.md`.
+
 ## Cost
 
 | step | wall | peak GPU |
