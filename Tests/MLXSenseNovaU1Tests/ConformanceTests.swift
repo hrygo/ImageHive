@@ -7,6 +7,7 @@
 import Foundation
 import MLXServeConformance
 import MLXToolKit
+import SenseNovaU1
 import XCTest
 
 @testable import MLXSenseNovaU1
@@ -66,6 +67,82 @@ final class ConformanceTests: XCTestCase {
         let report = await CancellationConformance.checkRun(
             package: package, request: T2IRequest(prompt: "conformance probe"))
         XCTAssertTrue(report.passed, "CAN run gate failed:\n\(report.summary)")
+    }
+
+    // MARK: - Pose specialty (C6)
+
+    /// The pose tiers are a base-checkpoint merge, not a distill: every guard
+    /// that turns a surface off for the 8-step tiers must stay open for them.
+    func testPoseTiersKeepEverySurface() {
+        for variant in SenseNovaVariant.allCases where variant.isPoseTuned {
+            XCTAssertFalse(variant.isDistilled, "\(variant) must not be treated as a distill tier")
+            XCTAssertEqual(variant.defaultGuidance, 4.0, "\(variant) needs true CFG")
+            XCTAssertEqual(variant.defaultSteps, 28, "\(variant): 28 is the receipted setting")
+        }
+        XCTAssertEqual(SenseNovaVariant.pose8.quant, .int8)
+        XCTAssertEqual(SenseNovaVariant.poseBf16.quant, .bf16)
+    }
+
+    /// C6: the specialty is declared, uses the REGISTERED vocabulary, and is
+    /// scoped to the pose tiers — advertising it package-wide would tell the
+    /// Model Manager the plain tiers apply a skeleton, which they do not.
+    func testPoseSpecialtyIsRegisteredAndScoped() {
+        let pose = SenseNovaU1Package.poseManifest
+        XCTAssertFalse(pose.specialties.isEmpty, "pose manifest declares no specialty")
+        for weight in pose.specialties {
+            XCTAssertTrue(
+                weight.specialty.isRegistered,
+                "unregistered specialty \(weight.specialty.rawValue) — C6 vocabulary drift")
+        }
+        XCTAssertEqual(pose.specialties.map(\.specialty), [.poseDriven])
+        XCTAssertEqual(Set(pose.capabilities), [.imageEdit],
+                       "the pose manifest must not hijack the other capabilities' default routing")
+        XCTAssertTrue(SenseNovaU1Package.manifest.specialties.isEmpty,
+                      "the shared manifest must not advertise pose for the plain tiers")
+
+        for variant in SenseNovaVariant.allCases {
+            XCTAssertEqual(
+                variant.specialties.isEmpty, !variant.isPoseTuned,
+                "\(variant) advertises the wrong specialty set")
+        }
+    }
+
+    /// The pose registration must refuse a configuration whose weights carry no
+    /// pose adapter — otherwise `.poseDriven` would rank tiers that cannot do it.
+    func testPoseRegistrationRefusesNonPoseVariant() throws {
+        let registration = SenseNovaU1Package.poseRegistration
+        XCTAssertThrowsError(
+            try registration.makePackage(SenseNovaU1Configuration(variant: .q8)),
+            "the pose registration accepted a plain tier"
+        ) { error in
+            guard case PackageError.configurationMismatch = error else {
+                return XCTFail("wrong error for a non-pose variant: \(error)")
+            }
+        }
+        XCTAssertNoThrow(
+            try registration.makePackage(SenseNovaU1Configuration(variant: .pose8)))
+        XCTAssertNoThrow(
+            try registration.makePackage(SenseNovaU1Configuration(variant: .poseBf16)))
+    }
+
+    /// The two-slot prompt is the contract with the adapter: two placeholders,
+    /// pose first. It has to survive the placeholder expander with exactly two
+    /// images — a mismatch there throws rather than silently dropping a slot.
+    func testPosePromptExpandsToTwoImageSlots() throws {
+        let prompt = SenseNovaVariant.posePrompt
+        XCTAssertEqual(prompt.components(separatedBy: "<image>").count - 1, 2)
+        let poseSlot = try XCTUnwrap(prompt.range(of: "Image-1"))
+        let refSlot = try XCTUnwrap(prompt.range(of: "Image-2"))
+        XCTAssertLessThan(poseSlot.lowerBound, refSlot.lowerBound, "slot order is load-bearing")
+
+        let expanded = try Conversation.expandImagePlaceholders(
+            prompt: prompt, imageTokenCounts: [576, 576])
+        XCTAssertFalse(expanded.contains("<image>"), "a placeholder survived expansion")
+        XCTAssertEqual(
+            expanded.components(separatedBy: Conversation.imgContextToken).count - 1, 1152)
+        // and it must still reject a slot count the images cannot back
+        XCTAssertThrowsError(
+            try Conversation.expandImagePlaceholders(prompt: prompt, imageTokenCounts: [576]))
     }
 
     /// CAN-3: long-run manifests declare their checkpoint cadence.

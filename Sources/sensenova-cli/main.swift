@@ -5,6 +5,16 @@
 // Usage:
 //   sensenova-cli --weights DIR --cond-ids cond.npy --uncond-ids uncond.npy \
 //     --width 1024 --height 1024 --steps 20 --out out.npy [--seed 42]
+//
+// `--edit-image` is REPEATABLE — the reference conditions on N images and the
+// port's `it2iGenerate(images:)` always took an array; one flag was the only
+// thing capping the CLI at a single reference. Multi-reference prompts name
+// their slots ("Image-1: <image>\nImage-2: <image>\n..."), which is what the
+// pose tier expects (skeleton first, identity second).
+//
+// `--diff-artifacts A --diff-artifacts B` compares two converted artifacts
+// tensor-by-tensor and exits non-zero on any difference — the gate form, since
+// file hashes are not reproducible across converts (see the mode below).
 
 import Foundation
 import MLX
@@ -20,18 +30,27 @@ func flag(_ name: String) -> Bool {
     CommandLine.arguments.contains("--\(name)")
 }
 
+/// Every value given for a repeatable flag, in command-line order.
+func args(_ name: String) -> [String] {
+    let a = CommandLine.arguments
+    return a.indices.compactMap { i in
+        a[i] == "--\(name)" && i + 1 < a.count ? a[i + 1] : nil
+    }
+}
+
 func loadIDs(_ path: String) throws -> [Int32] {
     try MLX.loadArray(url: URL(fileURLWithPath: path)).asType(.int32).asArray(Int32.self)
 }
 
 let weights = URL(fileURLWithPath: arg("weights") ?? "/Volumes/Satechi/Development/mlxengine-image/weights/SenseNova-U1.5-8B-MoT")
-let editImage: EditImage? = try arg("edit-image").map {
+// Repeatable: all references are conditioned on, in the order given.
+let editImages: [EditImage] = try args("edit-image").map {
     try SenseNovaImageIO.loadEditImage(url: URL(fileURLWithPath: $0))
 }
-// editing default output: first input's aspect at ~2048² pixels (factor 32)
+// editing default output: FIRST input's aspect at ~2048² pixels (factor 32)
 var width = Int(arg("width") ?? "1024")!
 var height = Int(arg("height") ?? "1024")!
-if let img = editImage, arg("width") == nil, arg("height") == nil {
+if let img = editImages.first, arg("width") == nil, arg("height") == nil {
     let target = Int(arg("target-pixels") ?? "\(2048 * 2048)")!
     let (h, w) = SenseNovaImageIO.smartResize(
         height: img.gridH * 16, width: img.gridW * 16, factor: 32,
@@ -46,15 +65,84 @@ if let s = arg("seed") { params.seed = UInt64(s)! }
 if let c = arg("cfg") { params.cfgScale = Float(c)! }
 let outPath = arg("out") ?? "sensenova_out.npy"
 
+// --- artifact diff mode: --diff-artifacts A --diff-artifacts B ---
+// Order-independent, byte-exact tensor comparison of two artifact directories.
+// `save(arrays:)` hands MLX an UNORDERED map, so two converts of identical
+// weights lay their tensors out in a different order inside the shards and get
+// different file hashes — `shasum` is therefore not a reproducibility test for
+// this format, and the tensor content is. Exits 1 on any difference so it can
+// be used as a gate.
+let diffPaths = args("diff-artifacts")
+if !diffPaths.isEmpty {
+    guard diffPaths.count == 2 else {
+        print("[diff] need exactly two --diff-artifacts DIR arguments")
+        exit(2)
+    }
+    func artifactTensors(_ dir: URL) throws -> [String: MLXArray] {
+        let files = try FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("model-") && $0.pathExtension == "safetensors" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !files.isEmpty else {
+            throw SenseNovaError.badWeights("no shards under \(dir.path)")
+        }
+        var out: [String: MLXArray] = [:]
+        for url in files { out.merge(try loadArrays(url: url)) { _, new in new } }
+        return out
+    }
+    let lhs = try artifactTensors(URL(fileURLWithPath: diffPaths[0]))
+    let rhs = try artifactTensors(URL(fileURLWithPath: diffPaths[1]))
+    var problems: [String] = []
+    for key in Set(lhs.keys).subtracting(rhs.keys).sorted() { problems.append("only in A: \(key)") }
+    for key in Set(rhs.keys).subtracting(lhs.keys).sorted() { problems.append("only in B: \(key)") }
+    var compared = 0
+    for key in Set(lhs.keys).intersection(rhs.keys).sorted() {
+        let a = lhs[key]!
+        let b = rhs[key]!
+        if a.shape != b.shape {
+            problems.append("\(key): shape \(a.shape) vs \(b.shape)")
+        } else if a.dtype != b.dtype {
+            problems.append("\(key): dtype \(a.dtype) vs \(b.dtype)")
+        } else {
+            let ad: Data = a.asData()
+            let bd: Data = b.asData()
+            if ad != bd {
+                switch a.dtype {
+                case .float32, .float16, .bfloat16, .float64:
+                    let delta = MLX.abs(a.asType(.float32) - b.asType(.float32))
+                        .max().item(Float.self)
+                    problems.append("\(key): differs (max |Δ| \(delta))")
+                default:
+                    // packed quantized payloads — a float delta over a uint32
+                    // bit pattern is noise, so count bytes instead
+                    let n = zip(ad, bd).reduce(0) { $1.0 == $1.1 ? $0 : $0 + 1 }
+                    problems.append("\(key): differs (\(n)/\(ad.count) packed bytes)")
+                }
+            }
+        }
+        compared += 1
+    }
+    print("[diff] compared \(compared) tensors")
+    if problems.isEmpty {
+        print("[diff] IDENTICAL — every tensor matches byte-for-byte")
+        exit(0)
+    }
+    print("[diff] \(problems.count) DIFFERENCE(S):")
+    for line in problems.prefix(20) { print("[diff]   \(line)") }
+    if problems.count > 20 { print("[diff]   … \(problems.count - 20) more") }
+    exit(1)
+}
+
 // --- VQA mode: --vqa "question" [--edit-image img] → prints the answer ---
 if let question = arg("vqa") {
     let tok = try await SenseNovaTokenizer.load(from: weights)
     var userMessage = question
     var images: [EditImage] = []
-    if let img = editImage {
+    if !editImages.isEmpty {
         userMessage = try Conversation.expandImagePlaceholders(
-            prompt: "<image>\n" + question, imageTokenCounts: [img.tokenCount])
-        images = [img]
+            prompt: String(repeating: "<image>\n", count: editImages.count) + question,
+            imageTokenCounts: editImages.map(\.tokenCount))
+        images = editImages
     }
     let ids = tok.encode(
         Conversation.vqaPrompt(userMessage: userMessage, think: flag("think")))
@@ -92,11 +180,13 @@ if arg("convert") != nil {
     uncondIds = nil
 } else if let prompt = arg("prompt") {
     let tok = try await SenseNovaTokenizer.load(from: weights)
-    if let img = editImage {
-        condIds = try tok.encode(Conversation.editCondPrompt(prompt, imageTokenCounts: [img.tokenCount]))
-        imgCondIds = try tok.encode(Conversation.editImgCondPrompt(imageTokenCounts: [img.tokenCount]))
+    if !editImages.isEmpty {
+        let counts = editImages.map(\.tokenCount)
+        condIds = try tok.encode(Conversation.editCondPrompt(prompt, imageTokenCounts: counts))
+        imgCondIds = try tok.encode(Conversation.editImgCondPrompt(imageTokenCounts: counts))
         uncondIds = nil  // editing default img_cfg == 1 needs no uncond branch
-        print("[cli] edit prompt tokenized: \(condIds.count) cond, \(imgCondIds!.count) img-cond ids")
+        print("[cli] edit prompt tokenized: \(editImages.count) image(s), "
+            + "\(condIds.count) cond, \(imgCondIds!.count) img-cond ids")
     } else {
         let pair = tok.t2iIDs(prompt: prompt)
         condIds = pair.cond
@@ -140,7 +230,7 @@ print("[cli] resident after load: \(GPU.activeMemory / (1 << 20)) MB active, pea
 
 t0 = Date()
 // --- think-mode T2I: AR reasoning block, then denoise ---
-if flag("think"), let prompt = arg("prompt"), editImage == nil {
+if flag("think"), let prompt = arg("prompt"), editImages.isEmpty {
     let tok = try await SenseNovaTokenizer.load(from: weights)
     let condThinkIds = tok.encode(
         Conversation.buildPrompt(
@@ -165,10 +255,10 @@ if flag("think"), let prompt = arg("prompt"), editImage == nil {
     exit(0)
 }
 let image: MLXArray
-if let img = editImage {
+if !editImages.isEmpty {
     image = try model.it2iGenerate(
         condIds: condIds, imgCondIds: imgCondIds, uncondIds: uncondIds,
-        images: [img], width: width, height: height,
+        images: editImages, width: width, height: height,
         params: params, imgCfgScale: Float(arg("img-cfg") ?? "1.0")!
     ) { step, total in
         if step % 5 == 0 || step == total {

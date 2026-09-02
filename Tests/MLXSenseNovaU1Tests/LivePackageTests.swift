@@ -97,4 +97,80 @@ final class LivePackageTests: XCTestCase {
         try? edit.image.data.write(
             to: Self.artifactsRoot.appendingPathComponent("live_edit_smoke.png"))
     }
+
+    /// Held-out pose fixtures (skeleton PNG + identity JPG). Two of the val
+    /// subjects are INVALID as pose fixtures — svilpaite's reference frame is
+    /// itself a handstand and its skeleton has no arm joints, mohedano the same
+    /// class of defect (AB-R-0196) — so the gate names its subject rather than
+    /// globbing the directory.
+    static func poseFixtures() throws -> (skeleton: Data, identity: Data) {
+        let root = URL(fileURLWithPath:
+            ProcessInfo.processInfo.environment["SENSENOVA_POSE_FIXTURES"]
+            ?? "/Volumes/Satechi/Development/training-resources/Datasets/PoseLoRADev"
+                + "/production-dataset/val")
+        let skeleton = root.appendingPathComponent("control_pose/bboyairchair_000000.png")
+        let identity = root.appendingPathComponent("control_reference/bboyairchair_000000.jpg")
+        guard FileManager.default.fileExists(atPath: skeleton.path),
+              FileManager.default.fileExists(atPath: identity.path)
+        else {
+            throw XCTSkip("pose fixtures not present — set SENSENOVA_POSE_FIXTURES")
+        }
+        return (try Data(contentsOf: skeleton), try Data(contentsOf: identity))
+    }
+
+    /// Live smoke for the pose specialty: a two-reference 768² edit driven the
+    /// way the consumer drives it — `IEditRequest(images: [skeleton, identity])`
+    /// with `SenseNovaVariant.posePrompt` — through the package API on the
+    /// pose-8bit tier. Also renders the SWAPPED slot order, which must not come
+    /// back as the same image: identical bytes would mean the second reference
+    /// slot is being ignored and the two-image path is a lie.
+    func testLivePoseEditTwoReference() async throws {
+        try requireLive()
+        let (skeletonData, identityData) = try Self.poseFixtures()
+        let snapshot = Self.artifactsRoot
+            .appendingPathComponent("SenseNova-U1.5-8B-MoT-pose-8bit")
+        let package = SenseNovaU1Package(
+            configuration: .init(variant: .pose8, snapshotPath: snapshot.path))
+        try await package.load()
+
+        let skeleton = Image(format: .png, data: skeletonData, width: 768, height: 768)
+        let identity = Image(format: .jpeg, data: identityData, width: 768, height: 768)
+
+        func render(_ images: [Image]) async throws -> Data {
+            let response = try await package.run(
+                IEditRequest(
+                    images: images, prompt: SenseNovaVariant.posePrompt,
+                    width: 768, height: 768,
+                    steps: SenseNovaVariant.pose8.defaultSteps, seed: 42))
+            guard let edit = response as? IEditResponse else {
+                throw XCTSkip("wrong response type")
+            }
+            return edit.image.data
+        }
+
+        do {
+            let correct = try await render([skeleton, identity])
+            let swapped = try await render([identity, skeleton])
+            XCTAssertGreaterThan(correct.count, 10_000, "suspiciously small PNG")
+            let size = decodePNGSize(correct)
+            XCTAssertEqual(size?.0, 768)
+            XCTAssertEqual(size?.1, 768)
+            XCTAssertNotEqual(
+                correct, swapped,
+                "the two reference slots are interchangeable — slot 2 is not conditioning")
+            let receipts = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Docs/receipts/pose-gates")
+            try? FileManager.default.createDirectory(
+                at: receipts, withIntermediateDirectories: true)
+            try? correct.write(to: receipts.appendingPathComponent("wrapper-pose-correct.png"))
+            try? swapped.write(to: receipts.appendingPathComponent("wrapper-pose-swapped.png"))
+            print("  [live] pose edit: \(correct.count) vs swapped \(swapped.count) bytes")
+        } catch {
+            await package.unload()
+            throw error
+        }
+        await package.unload()
+    }
 }

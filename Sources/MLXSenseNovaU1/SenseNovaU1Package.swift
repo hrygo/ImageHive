@@ -21,27 +21,76 @@ import UniformTypeIdentifiers
 
 /// The published artifact tiers (mlx-community). `8step` tiers carry the
 /// official 8-step distillation LoRA pre-merged and run cfg-free — fast T2I
-/// only; use `bf16`/`q8` for 50-step quality T2I and editing.
+/// only; use `bf16`/`q8` for 50-step quality T2I and editing. `pose` tiers
+/// carry the RefControl pose adapter pre-merged and keep every surface.
 public enum SenseNovaVariant: String, Codable, Sendable, CaseIterable {
     case bf16 = "bf16"
     case q8 = "8bit"
     case fast8 = "8step-8bit"
     case fast4 = "8step-4bit"
 
+    /// **Pose specialty, bf16.** The RefControl pose adapter (v1 @3000, rank 32
+    /// / alpha 32, 294 `*_mot_gen` gen-stream projections) merged into the base
+    /// checkpoint at fp32 and cast — the same merge the base tiers get for the
+    /// 8-step distill, over a different adapter.
+    case poseBf16 = "pose-bf16"
+
+    /// **Pose specialty, int8** — the shipping pose tier. The merged 8-bit
+    /// artifact reproduces the bf16 renders on all five valid held-out fixtures
+    /// (AB-R-0194), so the 20 GB tier is not a quality compromise here. The
+    /// duplicate-figure effect seen at an earlier checkpoint under int8 was
+    /// checkpoint-specific, not a property of the tier.
+    case pose8 = "pose-8bit"
+
     public var repo: String { "mlx-community/SenseNova-U1.5-8B-MoT-\(rawValue)" }
 
     public var quant: Quant {
         switch self {
-        case .bf16: return .bf16
-        case .q8, .fast8: return .int8
+        case .bf16, .poseBf16: return .bf16
+        case .q8, .fast8, .pose8: return .int8
         case .fast4: return .int4
         }
     }
 
     /// LoRA-merged distill tiers run cfg-free at 8 steps (the vendor contract).
     public var isDistilled: Bool { self == .fast8 || self == .fast4 }
-    public var defaultSteps: Int { isDistilled ? 8 : 50 }
+
+    /// Pose tiers are a **base-checkpoint merge, not a distill** — the sampler
+    /// contract is unchanged, so editing, think mode and VQA all stay enabled
+    /// (the `distilledTierCannot…` guards deliberately do not fire here).
+    public var isPoseTuned: Bool { self == .pose8 || self == .poseBf16 }
+
+    /// 28 steps on the pose tiers is the A/B's setting, not a guess: the
+    /// 28-vs-50 comparison at fixed seed costs 1.84× for ~6 % more
+    /// high-frequency texture, and every pose receipt was rendered at 28.
+    public var defaultSteps: Int {
+        if isDistilled { return 8 }
+        return isPoseTuned ? 28 : 50
+    }
+
     public var defaultGuidance: Float { isDistilled ? 1.0 : 4.0 }
+
+    /// C6 model-level ranking metadata. Only the pose tiers advertise
+    /// `.poseDriven` — the base tiers read a skeleton as something to paste,
+    /// not as a pose to apply (the zero-adapter experiment in the eval), so
+    /// declaring it fleet-wide for this package would mis-rank them.
+    public var specialties: [SpecialtyWeight] {
+        isPoseTuned ? [SpecialtyWeight(.poseDriven, strength: 0.8)] : []
+    }
+
+    /// The two-slot prompt the pose adapter was trained and A/B-ed with.
+    ///
+    /// **Slot order is load-bearing**: image 1 is the POSE (an OpenPose-style
+    /// skeleton render), image 2 is the IDENTITY/appearance reference. Pass
+    /// them to `IEditRequest(images:)` in that order —
+    /// `IEditRequest(images: [skeleton, identity], prompt: SenseNovaVariant.posePrompt)`.
+    /// Swapping the slots degrades the render (the `pose-slot-swap` gate); a
+    /// weak skeleton (no arm joints) also loses to the reference's own pose
+    /// prior, which is a fixture-quality failure rather than a model one
+    /// (AB-R-0196).
+    public static let posePrompt =
+        "Image-1: <image>\nImage-2: <image>\n"
+        + "apply pose from image 1 with reference from image 2"
 }
 
 /// Init-time configuration (C9): variant + explicit snapshot override + defaults.
@@ -59,6 +108,12 @@ public struct SenseNovaU1Configuration:
     /// Fresh-machine sources (MAT): one self-contained artifact per variant —
     /// quant-tiered configs exclude every byte their tier doesn't need by
     /// construction (each tier is its own repo).
+    ///
+    /// ⚠ `revision: "main"` here is OUR artifact repo's main, not the upstream
+    /// checkpoint's — this seam never fetches `sensenova/…`. The upstream pin
+    /// lives on `Provenance.revision` (see the manifest), and it stays pinned
+    /// precisely so an upstream re-shard cannot silently change what these
+    /// artifacts were built from.
     public var weightSources: [WeightSource] {
         [WeightSource(role: "model", repo: variant.repo, revision: "main", matching: ["*"])]
     }
@@ -146,6 +201,17 @@ public final class SenseNovaU1Package: ModelPackage {
     public nonisolated static var manifest: PackageManifest {
         PackageManifest(
             license: LicenseDeclaration(weightLicense: .apache2, portCodeLicense: .mit),
+            // Upstream origin, PINNED. Hub `main` moved on 2026-08-24 to
+            // `19bc874e` ("Convert to BF16 and re-shard": 8 shards / 32.7 GB,
+            // against the pinned `07d76f61`'s fp32 13 shards / 47 GB). Same
+            // weights at the dtype this port casts to at load, so no behaviour
+            // change is expected — but every published artifact was converted
+            // from `07d76f61`, and a rebuild from today's `main` starts from a
+            // different index and shard layout. The pin is what makes that
+            // statement checkable, so it does NOT follow `main`; the note
+            // rides the registry row. Nothing the wrapper fetches is affected
+            // (see `weightSources` — that address is our own mlx-community
+            // artifact repo).
             provenance: Provenance(
                 sourceRepo: "sensenova/SenseNova-U1.5-8B-MoT",
                 revision: "07d76f61474b9c6e6999e22c559314d3439b8c81", tier: 3),
@@ -208,7 +274,8 @@ public final class SenseNovaU1Package: ModelPackage {
                     summary: "Identity-preserving instruction editing on the same "
                         + "resident model (image-conditioned generation, cfg 4; "
                         + "metaData imageGuidance (1...4) adds the image-CFG axis; "
-                        + "base bf16/8bit tiers).",
+                        + "base bf16/8bit and pose tiers). N reference images are "
+                        + "conditioned on in the order given.",
                     modes: []
                 ),
                 ImageAnalysisContract.descriptor(
@@ -538,5 +605,70 @@ extension SenseNovaU1Package {
     /// The author one-liner the engine registers.
     public nonisolated static var registration: PackageRegistration {
         .of(SenseNovaU1Package.self)
+    }
+
+    /// The **pose specialty** manifest: the same model, the same requirements
+    /// and the same two license layers, advertising `.poseDriven` (C6) over a
+    /// single surface.
+    ///
+    /// Why a second manifest rather than a specialty on the shared one: a
+    /// `PackageManifest` is static per package TYPE, while pose-ness is a
+    /// property of two of the six artifact tiers. Declaring `.poseDriven` on
+    /// the shared manifest would tell the Model Manager that the plain bf16
+    /// and 8-bit tiers apply a skeleton, which the zero-adapter experiment
+    /// says they do not — they paste it into the frame.
+    ///
+    /// It declares **only `imageEdit`**. The merge is a base-checkpoint merge,
+    /// so T2I, think mode and VQA all still run on these weights — but
+    /// registering them here would make the pose tier the *default* backer for
+    /// those capabilities too (last registration wins routing), and a
+    /// pose-conditioned gen stream is not what a plain `textToImage` call
+    /// wants. Register the base tiers for those.
+    public nonisolated static var poseManifest: PackageManifest {
+        let base = manifest
+        return PackageManifest(
+            license: base.license,
+            provenance: base.provenance,
+            requirements: base.requirements,
+            specialties: [SpecialtyWeight(.poseDriven, strength: 0.8)],
+            surfaces: [
+                IEditContract.descriptor(
+                    name: "sensenova-u1-pose-edit",
+                    summary: "Pose transfer as a two-reference edit: image 1 is an "
+                        + "OpenPose-style skeleton, image 2 the identity/appearance "
+                        + "reference, and the prompt names the slots — "
+                        + "\"Image-1: <image>\\nImage-2: <image>\\napply pose from image 1 "
+                        + "with reference from image 2\" (SenseNovaVariant.posePrompt). "
+                        + "Slot ORDER is load-bearing. Needs a pose tier "
+                        + "(pose-8bit / pose-bf16); 28 steps, cfg 4, 768² is the "
+                        + "receipted setting.",
+                    modes: []
+                )
+            ]
+        )
+    }
+
+    /// Registration for the pose specialty. Same package type and the same
+    /// resident core — only the advertisement differs.
+    ///
+    /// The factory refuses a non-pose configuration on purpose: registering
+    /// this manifest against, say, the plain 8-bit tier would advertise
+    /// `.poseDriven` for weights that carry no pose adapter, which is exactly
+    /// the kind of quiet mis-declaration C6 ranking cannot recover from.
+    public nonisolated static var poseRegistration: PackageRegistration {
+        PackageRegistration(manifest: poseManifest) { configuration in
+            guard let typed = configuration as? Configuration else {
+                throw PackageError.configurationMismatch(
+                    expected: String(describing: Configuration.self),
+                    got: String(describing: type(of: configuration)))
+            }
+            guard typed.variant.isPoseTuned else {
+                throw PackageError.configurationMismatch(
+                    expected: "SenseNovaU1Configuration with a pose variant "
+                        + "(.pose8 / .poseBf16)",
+                    got: "variant .\(typed.variant)")
+            }
+            return SenseNovaU1Package(configuration: typed)
+        }
     }
 }
