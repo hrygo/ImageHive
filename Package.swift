@@ -21,6 +21,9 @@ let package = Package(
         // (textToImage + imageEdit on one resident core).
         .library(name: "MLXSenseNovaU1", targets: ["MLXSenseNovaU1"]),
         .executable(name: "sensenova-cli", targets: ["sensenova-cli"]),
+        // Local additions (not upstream): the resident service and its MCP front end.
+        .executable(name: "sensenova-served", targets: ["sensenova-served"]),
+        .executable(name: "sensenova-mcp", targets: ["sensenova-mcp"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.30.0"),
@@ -70,6 +73,21 @@ let package = Package(
             name: "SenseNovaU1Tests",
             dependencies: ["SenseNovaU1"],
             path: "Tests/SenseNovaU1Tests"
+        ),
+        .executableTarget(
+            name: "sensenova-served",
+            dependencies: [
+                "SenseNovaU1",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Sources/sensenova-served",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .executableTarget(
+            name: "sensenova-mcp",
+            dependencies: [],
+            path: "Sources/sensenova-mcp",
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]
 )
