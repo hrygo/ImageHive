@@ -15,6 +15,24 @@
 
 import Foundation
 
+let serviceVersion = "0.1.0"
+let arguments = Array(CommandLine.arguments.dropFirst())
+if arguments.contains("--version") || arguments.contains("-v") {
+    print("sensenova-mcp \(serviceVersion)")
+    exit(0)
+}
+if arguments.contains("--help") || arguments.contains("-h") {
+    print("""
+    sensenova-mcp \(serviceVersion) — stdio MCP front end for the local SenseNova-U1.5 image service
+
+    Speaks MCP on stdin/stdout and forwards to the resident sensenova-served daemon,
+    starting it on demand. No arguments are needed; MCP clients launch it directly.
+
+    Environment: SENSENOVA_HOME, SENSENOVA_SOCKET, SENSENOVA_SERVED_BIN.
+    """)
+    exit(0)
+}
+
 // MARK: - configuration
 
 let environment = ProcessInfo.processInfo.environment
@@ -229,6 +247,46 @@ final class DaemonClient {
 }
 
 let daemon = DaemonClient()
+
+// MARK: - management switches (never used by MCP clients, handy for humans)
+
+func runManagementSwitch(_ flag: String) {
+    switch flag {
+    case "--status":
+        let response = (try? daemon.call(["cmd": "status"])) ?? [:]
+        guard let status = response["status"] as? [String: Any] else {
+            print("daemon unreachable")
+            exit(1)
+        }
+        let resident = (status["resident_tier"] as? String) ?? "cold"
+        let loads = status["loads_total"] as? Int ?? 0
+        let inflight = status["inflight"] as? Int ?? 0
+        let queued = status["queue_depth"] as? Int ?? 0
+        let ttl = status["ttl_seconds"] as? Double ?? 0
+        let peak = status["last_peak_mb"] as? Int ?? 0
+        print("resident_tier=\(resident)")
+        print("loads_total=\(loads)")
+        print("inflight=\(inflight)")
+        print("queue_depth=\(queued)")
+        print("ttl_seconds=\(Int(ttl))")
+        print("last_peak_mb=\(peak)")
+        if let when = status["last_request_at"] as? String { print("last_request_at=\(when)") }
+    case "--unload":
+        let response = (try? daemon.call(["cmd": "unload"])) ?? [:]
+        guard (response["ok"] as? Bool) == true else {
+            print("could not unload: \((response["error"] as? String) ?? "daemon unreachable")")
+            exit(1)
+        }
+        print("released \((response["unloaded"] as? String) ?? "none"); resident_tier=cold")
+    default:
+        break
+    }
+    exit(0)
+}
+
+for flag in arguments where flag == "--status" || flag == "--unload" {
+    runManagementSwitch(flag)
+}
 
 // MARK: - MCP tool catalogue
 

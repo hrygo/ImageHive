@@ -10,8 +10,11 @@
 //   idle unload      - TTL after last use, with a minimum warm time
 //   observable       - loads_total / resident_tier / inflight / queue_depth
 //
-// Environment: SENSENOVA_HOME, SENSENOVA_TTL_SECONDS (600),
-// SENSENOVA_MIN_WARM_SECONDS (60), SENSENOVA_SOCKET.
+// Configuration: $SENSENOVA_HOME/config.json (see ServiceConfig below), with
+// environment variables (SENSENOVA_HOME, SENSENOVA_CONFIG, SENSENOVA_TTL_SECONDS,
+// SENSENOVA_MIN_WARM_SECONDS, SENSENOVA_SOCKET, SENSENOVA_FAST_ARTIFACT,
+// SENSENOVA_QUALITY_ARTIFACT) overriding it. Both are optional: with neither,
+// the defaults below describe a stock `install.sh` layout.
 
 import CoreGraphics
 import Foundation
@@ -20,23 +23,70 @@ import MLX
 import SenseNovaU1
 import UniformTypeIdentifiers
 
-let home = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SENSENOVA_HOME"]
+let environmentForConfig = ProcessInfo.processInfo.environment
+
+let serviceVersion = "0.1.0"
+if CommandLine.arguments.dropFirst().contains(where: { $0 == "--version" || $0 == "-v" }) {
+    print("sensenova-served \(serviceVersion)")
+    exit(0)
+}
+
+/// The knobs a user is allowed to turn, from $SENSENOVA_HOME/config.json:
+///
+///     {
+///       "ttl_seconds": 600,
+///       "min_warm_seconds": 60,
+///       "fast_artifact": "artifacts/SenseNova-U1.5-8B-MoT-8step-4bit",
+///       "quality_artifact": "artifacts/SenseNova-U1.5-8B-MoT-bf16"
+///     }
+///
+/// Artifact paths are relative to SENSENOVA_HOME unless absolute. The file is
+/// optional, and environment variables win over it, so `install.sh` can drive
+/// everything without writing one.
+struct ServiceConfig {
+    var ttlSeconds: Double = 600
+    var minWarmSeconds: Double = 60
+    var fastArtifact = "artifacts/SenseNova-U1.5-8B-MoT-8step-4bit"
+    var qualityArtifact = "artifacts/SenseNova-U1.5-8B-MoT-bf16"
+
+    static func load(from url: URL) -> ServiceConfig {
+        var config = ServiceConfig()
+        guard let data = FileManager.default.contents(atPath: url.path),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return config }
+        if let value = object["ttl_seconds"] as? Double { config.ttlSeconds = value }
+        if let value = object["ttl_seconds"] as? Int { config.ttlSeconds = Double(value) }
+        if let value = object["min_warm_seconds"] as? Double { config.minWarmSeconds = value }
+        if let value = object["min_warm_seconds"] as? Int { config.minWarmSeconds = Double(value) }
+        if let value = object["fast_artifact"] as? String, !value.isEmpty { config.fastArtifact = value }
+        if let value = object["quality_artifact"] as? String, !value.isEmpty { config.qualityArtifact = value }
+        return config
+    }
+}
+
+let home = URL(fileURLWithPath: environmentForConfig["SENSENOVA_HOME"]
     ?? FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Models/SenseNova-U1.5").path)
-let ttlSeconds = Double(ProcessInfo.processInfo.environment["SENSENOVA_TTL_SECONDS"] ?? "600") ?? 600
-let minWarmSeconds = Double(ProcessInfo.processInfo.environment["SENSENOVA_MIN_WARM_SECONDS"] ?? "60") ?? 60
-let socketPath = ProcessInfo.processInfo.environment["SENSENOVA_SOCKET"]
+let configURL = URL(fileURLWithPath: environmentForConfig["SENSENOVA_CONFIG"]
+    ?? home.appendingPathComponent("config.json").path)
+let serviceConfig = ServiceConfig.load(from: configURL)
+let ttlSeconds = environmentForConfig["SENSENOVA_TTL_SECONDS"].flatMap(Double.init) ?? serviceConfig.ttlSeconds
+let minWarmSeconds = environmentForConfig["SENSENOVA_MIN_WARM_SECONDS"].flatMap(Double.init) ?? serviceConfig.minWarmSeconds
+let fastArtifact = environmentForConfig["SENSENOVA_FAST_ARTIFACT"] ?? serviceConfig.fastArtifact
+let qualityArtifact = environmentForConfig["SENSENOVA_QUALITY_ARTIFACT"] ?? serviceConfig.qualityArtifact
+let socketPath = environmentForConfig["SENSENOVA_SOCKET"]
     ?? FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/SenseNovaU1/served.sock").path
 let outDir = home.appendingPathComponent("out")
 
 func artifactDir(_ tier: String) -> URL {
+    let relative: String
     switch tier {
-    case "fast", "8step", "fast8":
-        return home.appendingPathComponent("artifacts/SenseNova-U1.5-8B-MoT-bf16-8step")
-    default:
-        return home.appendingPathComponent("artifacts/SenseNova-U1.5-8B-MoT-bf16")
+    case "fast", "8step", "fast8": relative = fastArtifact
+    default: relative = qualityArtifact
     }
+    if relative.hasPrefix("/") { return URL(fileURLWithPath: relative) }
+    return home.appendingPathComponent(relative)
 }
 
 // MARK: - PNG output (NCHW float32 in -1..1 -> 8-bit RGB PNG)
@@ -150,7 +200,10 @@ actor Core {
         let dir = artifactDir(tier)
         guard FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path) else {
             throw NSError(domain: "sensenova", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "artifact missing: \(dir.path)"])
+                NSLocalizedDescriptionKey: """
+                artifact missing: \(dir.path) — download it with `sensenova-u1 models pull` \
+                or re-run install.sh
+                """])
         }
         let t0 = Date()
         let task = Task.detached(priority: .userInitiated) { () throws -> Resident in
@@ -378,6 +431,7 @@ try? FileManager.default.createDirectory(
 
 guard let listenFD = openListener(socketPath) else { exit(3) }
 log("listening on \(socketPath) (ttl \(Int(ttlSeconds))s, min warm \(Int(minWarmSeconds))s)")
+log("home \(home.path) | fast \(artifactDir("fast").lastPathComponent) | quality \(artifactDir("quality").lastPathComponent)")
 
 let sweeper = Thread {
     while true {
