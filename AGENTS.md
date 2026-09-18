@@ -46,6 +46,19 @@ documentation.
    [NOTICE](NOTICE)).
 6. **Nothing runs as root and nothing writes outside the user's home**, excepting
    the user's own launchd directory. See [Docs/LAYOUT.md](Docs/LAYOUT.md).
+7. **A request is validated before anything is loaded, and the CLI mirrors the
+   daemon's rules.** Sizes, step counts and seeds are checked in `sensenova-served`
+   *before* `ensureLoaded` — a size the model cannot render is not a failed
+   request, it is an uncatchable `[reshape]` fatal error that takes the shared
+   service down with it (measured: `1000x1000` in 0.5.0). `cli/sensenova-u1`
+   repeats the same checks locally so a typo does not need a round trip. Add the
+   rule in both places (and the alternative value to both messages), then assert
+   it in `Tests/cli.sh` and `Tests/smoke.sh`.
+8. **A result is described in three places.** Anything a caller can read in the
+   MCP reply or in `--json` also goes into the sidecar written next to the image,
+   and anything that describes what the service accepts also goes into
+   `model_options`. A field added in only one of them is the drift that made
+   "which prompt produced this file?" unanswerable.
 
 ## Layout and configuration
 
@@ -77,8 +90,9 @@ install.sh --dry-run --model none --clients none     # show every action
 ```
 
 `sensenova-u1` is the management CLI (`status`, `doctor`, `models`, `clients`,
-`logs`, `unload`, `generate`, `config`, `paths`). `doctor` exits non-zero when
-something is actually broken, so it is safe to use as a check.
+`logs`, `unload`, `generate`, `options`, `config`, `paths`). `doctor` exits
+non-zero when something is actually broken, so it is safe to use as a check;
+`options` prints the daemon's capability contract without loading the weights.
 
 ## How to verify a change
 
@@ -87,10 +101,16 @@ these green, and to say so in the commit message:
 
 1. `swift build -c release` for both products — no new warnings.
 2. `make test-quick` — protocol, single-instance refusal, cold status.
-3. `make test` — three concurrent clients, one load (`loads_total == 1`), one
-   `sensenova-served` process. This is the assertion the project exists for.
+3. `make test` — `Tests/smoke.sh` plus `Tests/cli.sh`: three concurrent clients,
+   one load (`loads_total == 1`), one `sensenova-served` process, and the CLI's
+   own contract (help, validation, `--json`, seed/sidecar, `--out`, `--n`). The
+   shared-weights assertion is the one the project exists for.
 4. `install.sh --dry-run` and `uninstall.sh --dry-run` — no state change, no
    errors.
+
+Both test scripts write into a scratch `HOME`/output directory; keep it that way.
+`Tests/smoke.sh` used to inherit the user's real `~/Pictures/SenseNovaU1` and
+quietly filled it with smoke images.
 
 **Never test installers against your real home.** Point `HOME` at a scratch
 directory and give the job its own label; this exercises the whole path
