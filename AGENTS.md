@@ -6,7 +6,8 @@
 
 ## 本仓库是什么
 
-本仓库内含上游 [`xocialize/sensenova-u1-swift`](https://github.com/xocialize/sensenova-u1-swift)
+本仓库内含上游
+[`xocialize/sensenova-u1-swift`](https://github.com/xocialize/sensenova-u1-swift)
 的 Swift/MLX 移植源码（连同它的提交历史），并在其上新增一套常驻生图服务：
 
 ```text
@@ -199,13 +200,13 @@ launchctl bootout gui/$(id -u)/local.imagehive-test
 
 ## 与上游保持同步
 
-上游移植以 `upstream` 远程引入，本仓库是 `origin`；本仓库自己的提交线是当前分支
-`local/main`，也就是 `origin/main`（公开默认分支）承载的内容。本地 `main` 分支仍停在本仓库
-取用上游代码时的那个基线提交。
+上游移植以 `upstream` 远程引入，本仓库是 `origin`。工作分支就叫 `main`（公开默认分支
+`origin/main` 承载的就是它），上游那份基线是 `upstream/main`（`96a0c9b`，本仓库取用上游代码
+时的那个提交），本地不再单独留一条基线分支——它没有独有提交，随时能从 `upstream` 取回。
 
 ```bash
 git fetch upstream
-git rebase upstream/main local/main
+git rebase upstream/main main
 ```
 
 本仓库只新增文件，所以唯一会冲突的是 `Package.swift`：保留上游内容，再把两个 executable

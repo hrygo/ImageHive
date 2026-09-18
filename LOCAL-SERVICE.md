@@ -4,7 +4,7 @@
 变成一台常驻服务与一个 MCP 前端，让 opencode、Codex、QwenPaw 按需调用，并且**永远
 只有一份权重常驻**。上游的模型实现、测试与文档一概未改。
 
-- 上游基线：`96a0c9b`（`upstream/main`），我们的提交全部在 `local/main` 分支上。
+- 上游基线：`96a0c9b`（`upstream/main`），我们的提交全部在 `main` 分支上。
 - 相关设计、验收记录与机器接线见 `本机优化配置` 仓库
   `docs/superpowers/specs/2026-09-18-sensenova-u15-local-image-service-design.md`。
 - 除服务本体外，本分支还带上了分发用的外壳：`install.sh` / `uninstall.sh`、
@@ -62,7 +62,7 @@ socket 协议是换行分隔 JSON：`{"cmd":"generate"|"edit"|"vqa"|"status"|"un
 
 ```bash
 git fetch upstream
-git rebase upstream/main local/main
+git rebase upstream/main main
 ```
 
 我们只新增文件，唯一会与上游冲突的是 `Package.swift`（两个 target 追加在文件末尾），
