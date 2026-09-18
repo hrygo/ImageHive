@@ -2,6 +2,89 @@
 
 ## Unreleased
 
+## 0.5.1 — 2026-09-18
+
+**A run is now reproducible, self-describing and scriptable — and a bad request
+can no longer kill the service.** This round came out of using the thing the way
+someone comparing two models actually uses it, and the first discovery was not a
+missing convenience but a crash.
+
+* **A size that is not a multiple of 32 used to abort the daemon**, not the
+  request. `Configuration.pixelsPerToken` is `patchSize / downsampleRatio` =
+  16 / 0.5 = 32, so `1000x1000` became a latent grid the reshape could not
+  satisfy: `Fatal error: [reshape] Cannot reshape array of size 3000000 into
+  shape (1,3,31,32,31,32)`, uncatchable, every client session on the shared
+  socket lost. `width`, `height` (multiples of 32, 32–4096), `steps` (1–500) and
+  `seed` (non-negative) are now validated **before** the weights are loaded —
+  a bad request costs nothing and the reply names the nearest legal value.
+  Negative seeds and `steps: 0` were the same class of bug (`UInt64(-1)` trap).
+* **`negative` now works on `generate_image`, and is refused on `edit_image`
+  instead of being silently dropped.** The daemon ignored the argument end to
+  end, while the model underneath supported it all along
+  (`SenseNovaTokenizer.t2iIDs(prompt:negativePrompt:)`); measured, two requests
+  with different negatives produced byte-identical files. The edit surface has no
+  unconditional branch, so a non-empty negative there is now an error rather than
+  a no-op.
+* **Every image is accompanied by metadata.** `<image>.png.json` records the
+  prompt and its SHA-256, the negative prompt and its hash, the seed **and whether
+  it was pinned or random**, size, steps, cfg, the tier requested and the tier
+  that ran, the artifact directory, seconds, peak memory, `created_at` and the
+  project/protocol version. Before this, the only surviving record of a run was a
+  file name, and a comparison could only be described, not proven.
+  `write_sidecar: false` / `SENSENOVA_SIDECAR=0` turns it off.
+* **`--seed` on the CLI and `seed` on the tools**, with `--n` for a batch:
+  `--seed 500 --n 4` produces seeds 500–503, one file each. Byte-identical
+  repeatability with the same seed and artifact was verified before relying on it
+  (identical SHA-256 across runs).
+* **`--json`, `--out`, `--steps`, `--cfg`, `--negative`** on `sensenova-u1
+  generate`, and `-h/--help` on every subcommand (`generate --help` used to be
+  `error: unknown option: --help`). `--json` emits one object, or an array for a
+  batch, with machine-readable paths and timings instead of a sentence to
+  re-parse; `--out` moves the PNG **and its sidecar** together.
+* **New `model_options` MCP tool and `sensenova-u1 options`**: the contract —
+  sizes and recommended values, step and cfg ranges with per-tier defaults, the
+  seed rule, which arguments apply to which tool, whether a sidecar is written,
+  whether cancellation exists, and which tiers this machine can serve — returned
+  without loading the weights. Clients no longer discover the rules by sending
+  requests and reading the 400s.
+* **`model_status` answers while a generation is running.** A generation holds
+  the actor for its whole duration, so `status` used to block behind it — measured
+  at 75.3 s, which made the tool useless for telling "busy" from "stuck", and made
+  `unload`'s busy path dead code. `status`, `options` and the busy branch of
+  `unload` are now answered on the connection thread from a `StatusBoard`
+  snapshot; the in-flight job publishes `current` (`tool`, `step`, `total`,
+  `percent`, `elapsed_seconds`) from the step callback, which is also what the
+  CLI's progress line reads.
+* **The CLI shows progress on stderr while it waits** (only on a TTY, so piped
+  and captured runs stay silent), polling `status.current` — a 71 s generation no
+  longer looks like a hang.
+* `sensenova-served` and `sensenova-mcp` report the project version from
+  `SENSENOVA_VERSION` (written into `service.conf` by the installer) instead of a
+  hard-coded `0.1.0` that had been wrong since 0.2, and expose
+  `protocol: 1` for clients that want to detect the shape of the replies.
+* Error replies use the underlying `localizedDescription` rather than dumping an
+  `NSError`.
+* **Not done, deliberately**: a request in flight still cannot be cancelled (the
+  reply states it instead of pretending otherwise), the socket protocol stays
+  one-line-in/one-line-out so no progress messages travel over it, and
+  `--manifest` is not implemented — `--seed` + `--n` + `--json` covers the same
+  ground for now.
+* Tests: new `Tests/cli.sh` (help, validation, `options`, `--json` + seed +
+  sidecar + byte-identical repeat, `--out`, `--n`, service survives a bad
+  request), `Tests/smoke.sh` gained `model_options`, the bad-size-survival case,
+  the same-seed byte-identity case and the "status answers during a generation"
+  case. `Tests/smoke.sh` also stopped writing into the user's real
+  `~/Pictures/SenseNovaU1/` (it never set `SENSENOVA_OUT`) — that is where the
+  stray benchmark images came from. `make test-quick` runs both scripts in their
+  fast mode; CI compiles the CLI's Python helpers.
+* Docs: [Docs/MODELS.md](Docs/MODELS.md) gained "Image sizes" (the rule, the
+  recommended set, the measured cost), [Docs/LAYOUT.md](Docs/LAYOUT.md) explains
+  the sidecar beside the image, [Docs/CLIENTS.md](Docs/CLIENTS.md) gained "What
+  the tools take" (argument table plus the six things an agent needs to know
+  first), [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md) covers the size
+  refusal and the "I killed it and the image appeared anyway" case; both READMEs
+  document the comparison workflow in their own language.
+
 * `scripts/verify_release.sh` no longer aborts on read-only files. It quarantined the
   extracted copy with one recursive `xattr -wr`, and xattr refuses a file the caller
   cannot write — a macOS resource inside a bundle can be mode 444 in an archive built

@@ -21,6 +21,31 @@ sensenova-u1 models pull all                 # everything (48 GiB+)
 sensenova-u1 models verify                   # sizes on disk vs the download manifest
 ```
 
+## Image sizes
+
+`width` and `height` are pixels, and both must be **multiples of 32**, from 32 to
+4096. That is not a policy but the latent grid: the tower patches at 16 px and
+downsamples by 0.5, so one token covers 32 px and the image is cut into a
+`size/32` grid. A value that does not divide is refused before any weights are
+loaded, and the message names legal values to use instead.
+
+| Shape | Size |
+|---|---|
+| square 1:1 | 1024×1024 |
+| landscape 3:2 | 1216×832 |
+| landscape 16:9 | 1600×896 |
+| portrait 9:16 | 896×1600 |
+
+1024×1024 is the default when a request names no size, and the reference point
+for comparisons. `sensenova-u1 options` prints this table in a terminal and
+`model_options` returns it as JSON, so a client can read the contract up front
+instead of discovering it from a rejection.
+
+Cost scales with pixel count. Measured on an M5 Max with the quality artifact at
+50 steps: 1024×1024 took ~50 s and 1536×1024 took ~71 s. Larger canvases are
+proportionally slower; the daemon makes no claim about how they look, only that
+they take longer.
+
 ## Sources
 
 Download happens with `curl` and resumes (`-C -`), so an interrupted run costs

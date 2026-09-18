@@ -1,10 +1,10 @@
 # SenseNova-U1.5 本机生图服务
 
-> [English](README.md) · 英文版为准，中文版随 0.5.0 同步。术语、命令、字段、模型
+> [English](README.md) · 英文版为准，中文版随 0.5.1 同步。术语、命令、字段、模型
 > 名保持原文，方便和日志、配置、英文文档对上。
 >
 > 版本号：接续上游 tag 序列（fork 时上游停在 `v0.4.0`），因此首个公开版是
-> **0.5.0**；发行包里的 `BUILD-INFO.txt` 记录所基于的上游提交。
+> **0.5.0**，当前版本 **0.5.1**；发行包里的 `BUILD-INFO.txt` 记录所基于的上游提交。
 
 在自己的 Mac 上跑文生图、按指令改图和看图问答，通过 MCP 交给 AI agent 使用。
 不需要 API key、不按张计费、图片不出本机；模型经 MLX 在 Apple 芯片上运行，
@@ -115,9 +115,12 @@ sensenova-u1 clients snippet   # 给其它客户端粘贴的通用片段
 写配置前会做时间戳备份，重复运行是幂等的（不会写重复条目）。**改完必须重启
 客户端**，MCP 条目只在启动时加载。
 
-agent 那边会看到五个工具：`generate_image`（文生图）、`edit_image`（按指令改图）、
-`describe_image`（看图/读图上的字）、`model_status`（服务状态）、`unload_model`
-（立刻释放内存）。
+agent 那边会看到六个工具：`generate_image`（文生图，可给 `seed` 固定随机、可给
+`negative` 负向提示词、可覆盖 `steps`/`cfg`）、`edit_image`（按指令改图）、
+`describe_image`（看图/读图上的字）、`model_options`（**问之前先知道**：支持的尺寸、
+步数与 cfg 的取值范围和默认值、seed 是否可复现、negative 只对生成有效、元数据落在哪、
+本机装了哪些档）、`model_status`（服务状态 + 正在跑的任务进度，**生成期间也立刻返回**）、
+`unload_model`（立刻释放内存）。
 
 ## 日常命令
 
@@ -128,9 +131,32 @@ sensenova-u1 models     # 装了什么、还缺什么
 sensenova-u1 logs -f    # 跟随守护进程日志
 sensenova-u1 unload     # 立刻释放内存
 sensenova-u1 generate --prompt "一盏黄铜台灯，深色木桌，柔和侧光"
+sensenova-u1 options    # 这份服务接受什么：尺寸、步数、cfg、seed
 sensenova-u1 restart    # 重启守护进程（权重仍在磁盘上）
 sensenova-u1 paths      # 打印所有路径
 ```
+
+### 做对比评测：固定 seed + 元数据 + 结构化输出
+
+`--seed` 固定噪声；每张图旁边都会落一个 sidecar 记录"这张图是怎么来的"。这两件事
+加起来，"我用的应该是同一串提示词"才变成事后可核对的证据：
+
+```bash
+sensenova-u1 generate --prompt "一盏黄铜台灯" --seed 42 --width 1216 --height 832
+# Wrote ~/Pictures/SenseNovaU1/20260918T083207Z-t2i-seed42.png [1216x832, tier quality,
+#       50 steps, 51.3s, seed 42] + 20260918T083207Z-t2i-seed42.png.json
+sensenova-u1 generate --prompt "一盏黄铜台灯" --seed 42 --n 4 --out ~/eval/run1 --json
+```
+
+同一个 seed、同一个制品、同一组参数写出的 PNG **逐字节相同**（实测：512×512、6 步
+两次运行 SHA-256 一致）。sidecar（`<图片名>.png.json`）里有提示词原文与其 SHA-256、
+负向提示词、seed 以及它是被固定还是随机、尺寸、步数、cfg、实际运行的制品、耗时与
+峰值内存。`--json` 把同样的内容以机器可读的形式打出来（`--n > 1` 时是数组），
+`--out` 把图片和它的 sidecar 一起搬走。`sensenova-u1 generate --help` 列全部参数。
+
+批量跑之前需要知道的一件事：**已经派发的请求无法取消**。杀掉命令不会停止生成，图片
+照样落盘（详见 [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md)）。要做干净计数
+的评测，请等每一条返回再发下一条。
 
 守护进程**按需启动**：空闲一段时间后的第一次调用会加载权重（约 5 秒），之后所有
 调用复用它；空闲 10 分钟（`ttl_seconds`，在

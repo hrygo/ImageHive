@@ -66,10 +66,11 @@ reasoning, and the exact rules each choice follows, is in
 
 | Tool | What it does |
 |---|---|
-| `generate_image` | text → image; `tier=fast` for iteration, `tier=quality` for final art or text in the image |
+| `generate_image` | text → image; `tier=fast` for iteration, `tier=quality` for final art or text in the image. Takes a `seed` (reproducible), a `negative` prompt, and `steps`/`cfg` overrides |
 | `edit_image` | instruction editing with one or more reference images, identity preserved |
 | `describe_image` | read text out of a rendering, check a result against the brief, compare candidates |
-| `model_status` | which weights are resident, how many loads since boot, queue depth, peak memory |
+| `model_options` | what this service accepts, before anything is asked of it: sizes, steps/cfg ranges and defaults, the seed rule, that `negative` applies to generate but not edit, where sidecars land, which tiers are installed |
+| `model_status` | which weights are resident, how many loads since boot, queue depth, peak memory — plus the live step of the job in flight. Answers immediately even while a generation runs |
 | `unload_model` | give the ~15–35 GB back immediately instead of waiting for the idle timeout |
 
 ## Requirements
@@ -150,8 +151,33 @@ sensenova-u1 doctor      # check host, install, models, service, clients
 sensenova-u1 logs -f     # daemon log
 sensenova-u1 unload      # release the weights now
 sensenova-u1 generate --prompt "a brass compass on a dark desk" --tier fast
+sensenova-u1 options     # what sizes, steps, cfg and seeds are accepted
 sensenova-u1 restart     # restart the daemon (the weights stay on disk)
 ```
+
+### Comparing two runs, or two models
+
+`--seed` pins the noise, and every image is written with a sidecar recording what
+produced it — that is what turns "I think I used the same prompt" into something you
+can check afterwards:
+
+```bash
+sensenova-u1 generate --prompt "a brass compass" --seed 42 --width 1216 --height 832
+# Wrote ~/Pictures/SenseNovaU1/20260918T083207Z-t2i-seed42.png [1216x832, tier quality,
+#       50 steps, 51.3s, seed 42] + 20260918T083207Z-t2i-seed42.png.json
+sensenova-u1 generate --prompt "a brass compass" --seed 42 --n 4 --out ~/eval/run1 --json
+```
+
+Same seed + same artifact + same settings writes **byte-identical** bytes (measured:
+two 512×512 runs at 6 steps produced the same SHA-256). The sidecar beside each PNG
+carries the prompt verbatim and its SHA-256, the negative prompt, the seed and whether
+it was pinned, size, steps, cfg, the artifact that ran, wall time and peak memory.
+`--json` prints the same facts as a machine-readable object (an array when `--n > 1`),
+and `--out` moves the image and its sidecar together.
+
+One thing to know before a batch run: **a dispatched request cannot be cancelled.**
+Killing the command does not stop the generation and its PNG still lands — see
+[Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md).
 
 The daemon starts on demand: the first request after an idle period loads the
 weights (~5 s) and they are released again after 10 minutes of idleness

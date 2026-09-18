@@ -11,7 +11,7 @@ overridden.
 | Commands on `PATH` | `~/.local/bin/sensenova-u1` | `SENSENOVA_PREFIX`, `--prefix` |
 | Private executables: `sensenova-served`, `sensenova-mcp`, the MLX `*.bundle`s, the CLI's own scripts | `~/.local/share/sensenova-u1/` (binaries in `bin/`) | `SENSENOVA_PREFIX`, `--prefix` |
 | Log | `~/Library/Logs/SenseNovaU1/served.log` | — |
-| Generated images | `~/Pictures/SenseNovaU1/` | `SENSENOVA_OUT`, `--out` |
+| Generated images, each with its `<name>.png.json` sidecar | `~/Pictures/SenseNovaU1/` | `SENSENOVA_OUT`, `--out` |
 | launchd job | `~/Library/LaunchAgents/<label>.plist` | `SENSENOVA_LABEL`, `--label` |
 
 `sensenova-u1 paths` prints all of it for the install on this machine.
@@ -46,6 +46,18 @@ are per-tool directories rather than one shared `~/Models`.
 **Images in `~/Pictures`.** Generated PNGs are user files; Apple's rule that
 `~/Library` is for things the user should not have to see argues against hiding
 them inside the app's data directory.
+
+**A sidecar next to each image.** Every generation also writes
+`<name>.png.json` — the prompt and its SHA-256, the negative prompt, the seed and
+whether it was pinned or random, size, steps, cfg, the tier and artifact that
+ran, the seconds and peak memory, the project version. It is the same payload a
+`--json` CLI run or `structuredContent` returns, kept beside the PNG so a result
+is still self-describing after the terminal that produced it is gone. It is a
+plain file in the same directory, moved or copied with the image
+(`--out` moves both), and it can be turned off with `write_sidecar: false` in
+`config.json` or `SENSENOVA_SIDECAR=0`; an agent that wants a clean directory can
+also delete them, at the cost of no longer being able to prove how an image was
+made.
 
 **No root, no daemon-owned system paths.** Everything is per-user, so
 uninstalling never needs `sudo` and cannot break another user's install.

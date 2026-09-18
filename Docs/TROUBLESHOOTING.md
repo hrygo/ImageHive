@@ -75,6 +75,24 @@ idle (default 600 s). Raise `ttl_seconds` in
 `~/Library/Application Support/SenseNovaU1/config.json`
 if you would rather stay warm, or call `sensenova-u1 unload` when you are done.
 
+**`width 833 is not a multiple of 32` (or the same for `height`).**
+The model renders on a latent grid of `size/32`, so both dimensions have to be
+multiples of 32 (32–4096 px). The message names the nearest valid value: use it.
+Version 0.5.0 and earlier fed the raw number to the model and MLX aborted the
+**whole daemon** with an uncatchable `[reshape]` fatal error, which took down
+every client session sharing the service — the check now runs before any weights
+are loaded. `sensenova-u1 options` lists the recommended sizes (1024×1024,
+1216×832, 1600×896, 896×1600).
+
+**I killed a run, and the image appeared anyway.**
+That is expected, and it is why the daemon tracks work by request rather than by
+connection: a request that has already been dispatched runs to completion and
+writes its PNG even if the client process is gone, because cancelling mid-flight
+would leave the model in an unknown state. There is no cancel command
+(`model_options` reports `cancellation.supported: false`). A batch that is
+interrupted therefore leaves images behind — count them, or clear the output
+directory, before trusting a sample count.
+
 **Two clients, one at a time.**
 Generations are serialised inside the daemon on purpose: one resident model,
 one GPU. A second request waits its turn (`queue_depth` in `sensenova-u1 status`).

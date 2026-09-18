@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for the sensenova-u1 CLI and the installers. Sourced, not run.
 
-SV_VERSION="0.5.0"
+SV_VERSION="0.5.1"
 # Layout (see Docs/LAYOUT.md). macOS conventions, every path overridable:
 #   app data  ~/Library/Application Support/SenseNovaU1  (config, socket, weights)
 #   logs      ~/Library/Logs/SenseNovaU1
@@ -195,6 +195,10 @@ sv_write_conf() {
   # rewrite; a single-quoted value is stable under repeated writes.
   {
     printf '# Written by sensenova-u1 %s — safe to edit.\n' "$SV_VERSION"
+    # The daemon and the MCP front end read this: without it they can only say
+    # "unknown", and a generated file could not be traced back to a build. They used
+    # to hard-code a version of their own (0.1.0) that matched no release at all.
+    printf 'SENSENOVA_VERSION=%s\n' "$(sv_quote "$SV_VERSION")"
     printf 'SENSENOVA_HOME=%s\n' "$(sv_quote "$home")"
     printf 'SENSENOVA_PREFIX=%s\n' "$(sv_quote "$(sv_prefix)")"
     printf 'SENSENOVA_LABEL=%s\n' "$(sv_quote "$(sv_label)")"
