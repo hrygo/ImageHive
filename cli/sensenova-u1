@@ -151,7 +151,16 @@ cmd_doctor() {
 
   say "install"
   [ -f "$(sv_conf)" ] && check ok "service.conf" || check warn "service.conf missing" "re-run install.sh"
-  [ -f "$(sv_config)" ] && check ok "config.json" || check warn "config.json missing" "re-run install.sh"
+  if [ ! -f "$(sv_config)" ]; then
+    check warn "config.json missing" "re-run install.sh"
+  elif sv_config_parses; then
+    check ok "config.json"
+  else
+    # Present but unusable is worse than missing: the daemon starts anyway and serves
+    # the built-in defaults, so nothing else in this report would look wrong.
+    check warn "config.json is not valid JSON" \
+      "every setting in $(sv_config) is ignored (the daemon serves the built-in defaults) — fix it or delete it"
+  fi
   [ -d "$(sv_out_dir)" ] && check ok "output directory" || check warn "output directory not created yet" "$(sv_out_dir) appears on the first generation"
   [ -x "$(sv_served)" ] && check ok "sensenova-served" || check fail "sensenova-served missing" "run install.sh"
   [ -x "$(sv_mcp)" ] && check ok "sensenova-mcp" || check fail "sensenova-mcp missing" "run install.sh"
@@ -198,15 +207,25 @@ cmd_doctor() {
   else
     check warn "launchd job not loaded" "install.sh loads it; the front end also starts it on demand"
   fi
-  if [ -x "$(sv_mcp)" ] && sv_status >/dev/null 2>&1; then
-    check ok "daemon answering ($(sv_resident) / peak $(sv_peak_mb)MB)"
+  # One round trip, parsed here: three separate `sv_status` calls used to spawn the
+  # front end three times, and could disagree with each other.
+  local status_out="" field
+  if [ -x "$(sv_mcp)" ]; then
+    status_out="$(sv_status 2>/dev/null || true)"
+  fi
+  if [ -n "$status_out" ]; then
+    field() { printf '%s\n' "$status_out" | awk -F= -v key="$1" '$1==key{print $2}'; }
+    check ok "daemon answering ($(field resident_tier) / peak $(field last_peak_mb)MB)"
     # A daemon started before this install keeps the socket and answers with the
     # previous build's behaviour — "I reinstalled and nothing changed" is this.
-    local serving; serving="$(sv_daemon_version)"
+    local serving; serving="$(field project_version)"
     if [ "$serving" = "$SV_VERSION" ]; then
-      check ok "daemon is $serving (pid $(sv_daemon_pid))"
+      check ok "daemon is $serving (pid $(field pid))"
+    elif [ -z "$serving" ]; then
+      check warn "the daemon answering does not report a version (predates 0.5.1)" \
+        "an older process still owns the socket — run: sensenova-u1 restart"
     else
-      check warn "the daemon answering reports version ${serving:-unknown}, this install is $SV_VERSION" \
+      check warn "the daemon answering reports version $serving, this install is $SV_VERSION" \
         "an older process still owns the socket — run: sensenova-u1 restart"
     fi
   elif [ -x "$(sv_mcp)" ]; then
@@ -595,13 +614,13 @@ main() {
     config)   cmd_config "$@" ;;
     generate) cmd_generate "$@" ;;
     options)  cmd_options "$@" ;;
-    start)    sv_service_start && say "started $(sv_label)" ;;
-    stop)     sv_service_stop && say "stopped $(sv_label)" ;;
+    start)    sv_service_start && sv_service_announce started ;;
+    stop)     sv_service_stop && sv_service_announce stopped ;;
     # stop first, then start: `kickstart -k` alone replaces only the process
     # launchd owns, and the daemon is normally started by an MCP front end, so a
     # plain kickstart would leave the old binary serving. stop also reaps whatever
     # holds the socket (sv_service_reap_stray).
-    restart)  sv_service_stop && sv_service_start && say "restarted $(sv_label)" ;;
+    restart)  sv_service_stop && sv_service_start && sv_service_announce restarted ;;
     logs)     cmd_logs "$@" ;;
     unload)   sv_unload ;;
     paths)

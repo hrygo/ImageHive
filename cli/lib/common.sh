@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for the sensenova-u1 CLI and the installers. Sourced, not run.
 
-SV_VERSION="0.5.1"
+SV_VERSION="0.5.2"
 # Layout (see Docs/LAYOUT.md). macOS conventions, every path overridable:
 #   app data  ~/Library/Application Support/SenseNovaU1  (config, socket, weights)
 #   logs      ~/Library/Logs/SenseNovaU1
@@ -59,6 +59,23 @@ except Exception:
     value = ""
 print(value if isinstance(value, str) else "")
 ' "$file" "$1"
+}
+
+# Whether <app home>/config.json parses at all. The daemon answers the built-in
+# defaults when it does not and says so in its log and in `status`; without this
+# check `doctor` reported the file as present and the user had no way to learn that
+# every setting in it was being ignored.
+sv_config_parses() {
+  local file; file="$(sv_config)"
+  [ -f "$file" ] || return 1
+  sv_have python3 || return 0
+  python3 -c '
+import json, sys
+try:
+    json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+' "$file"
 }
 
 sv_fast_artifact() {
@@ -165,6 +182,20 @@ sv_load_conf() {
   [ -n "$keep_socket" ] && SENSENOVA_SOCKET="$keep_socket"
   [ -n "$keep_models" ] && SENSENOVA_MODELS="$keep_models"
   [ -n "$keep_out" ] && SENSENOVA_OUT="$keep_out"
+
+  # Export what was just resolved, so the front end this CLI spawns (and anything
+  # else it starts) resolves the *same* service. Without this a child falls back to
+  # the built-in defaults: on an install under a custom --home or --prefix,
+  # `sensenova-u1 status` would answer from — or silently start — a daemon in
+  # ~/Library/Application Support/SenseNovaU1, which is a second copy of the weights
+  # and the one thing this project must not do (measured 2026-09-18: an installer
+  # with a custom home started a second daemon on the default socket).
+  export SENSENOVA_HOME="$(sv_home)"
+  export SENSENOVA_MODELS="$(sv_models)"
+  export SENSENOVA_OUT="$(sv_out_dir)"
+  export SENSENOVA_SOCKET="$(sv_socket)"
+  export SENSENOVA_PREFIX="$(sv_prefix)"
+  export SENSENOVA_LABEL="$(sv_label)"
   return 0
 }
 
@@ -240,6 +271,13 @@ sv_service_start() {
   local domain="gui/$(id -u)" label err tries=0 waited=0
   label="$(sv_label)"
   err="$(mktemp)"
+  # Refuse early when the job was never installed, instead of letting launchctl fail
+  # on a plist that does not exist and echoing its raw "Try re-running the command as
+  # root for richer errors." back at the user.
+  if ! sv_service_loaded && [ ! -f "$(sv_plist)" ]; then
+    rm -f "$err"
+    die "the launchd job is not installed ($(sv_plist) is missing) — run: install.sh"
+  fi
   if sv_service_loaded; then
     # Already in the domain: ask launchd for a restart, which is what `-k` means.
     launchctl kickstart -k "$domain/$label" 2>"$err" || true
@@ -256,22 +294,74 @@ sv_service_start() {
     while ! sv_service_loaded; do
       tries=$((tries + 1))
       if [ "$tries" -ge 20 ]; then
-        warn "$(cat "$err")"
+        # launchctl's own text helps here, except for its "try as root" line: this is a
+        # per-user LaunchAgent, so running as root is never the fix.
+        local detail
+        detail="$(grep -v '^Try re-running the command as root' "$err" 2>/dev/null || true)"
+        if [ -n "$detail" ]; then
+          while IFS= read -r line; do [ -n "$line" ] && warn "launchctl: $line"; done <<< "$detail"
+        fi
         rm -f "$err"
-        die "could not load $label — try: launchctl bootstrap $domain $(sv_plist)"
+        die "could not load $label — inspect it with: launchctl print $domain/$label"
       fi
       sleep 0.25
     done
   fi
   rm -f "$err"
-  # Leave the caller with a socket that exists, so the next command (a status
-  # call, the installer's smoke test) never races the start.
+  # Leave the caller with a daemon that *answers*, not merely a socket file that
+  # exists: a killed daemon leaves the file behind, and every check in this CLI used
+  # to be satisfied by it. Measured 2026-09-18 — an install reported its service up,
+  # then failed its own smoke test, because the daemon it had just started was still
+  # binding while the socket file it inherited from the previous one was already there.
   while [ "$waited" -lt 160 ]; do
-    if [ -S "$(sv_socket)" ]; then return 0; fi
+    if sv_socket_listening; then return 0; fi
     waited=$((waited + 1))
     sleep 0.25
   done
-  warn "the job is loaded but $(sv_socket) did not appear within 40s — check $(sv_log)"
+  warn "the job is loaded but nothing is answering on $(sv_socket) after 40s — check $(sv_log)"
+  return 0
+}
+
+# True when something is actually accepting connections on the socket. The file
+# existing is not that: a daemon killed with SIGKILL (or one that has not unlinked
+# its socket yet) leaves a dead file behind.
+sv_socket_listening() {
+  # Without python3 fall back to the weaker test rather than waiting 40s for a
+  # probe that can never run.
+  sv_have python3 || { [ -S "$(sv_socket)" ]; return; }
+  python3 - "$(sv_socket)" <<'PY' >/dev/null 2>&1
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(0.5)
+try:
+    s.connect(sys.argv[1])
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
+
+# What `start`, `stop` and `restart` say. A start is only a start if something
+# answers afterwards, and a stop is only a stop if nothing does; both used to be
+# reported from the exit status of launchctl, which knows about the job and not about
+# the service.
+sv_service_announce() { # <verb>
+  local verb="$1" pid=""
+  if sv_socket_listening; then
+    pid="$(sv_daemon_pid 2>/dev/null || true)"
+    if [ "$verb" = "stopped" ]; then
+      warn "$verb $(sv_label), but something is still answering on $(sv_socket)${pid:+ (pid $pid)}"
+      return 0
+    fi
+    say "$verb $(sv_label)${pid:+ (pid $pid)}"
+  else
+    if [ "$verb" = "stopped" ]; then
+      say "$verb $(sv_label)"
+    else
+      warn "$verb $(sv_label), but nothing is answering on $(sv_socket) — check $(sv_log)"
+    fi
+  fi
   return 0
 }
 

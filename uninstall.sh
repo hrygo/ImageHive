@@ -98,6 +98,19 @@ main() {
   [ -f "$(sv_plist)" ] && { run rm -f "$(sv_plist)"; say "removed $(sv_plist)"; }
   pkill -f "sensenova-served" >/dev/null 2>&1 || true
   pkill -f "sensenova-mcp" >/dev/null 2>&1 || true
+  # The daemon unlinks its socket on SIGTERM, but a wedged or SIGKILLed process
+  # leaves the file behind — and "is anything answering on this socket?" is the
+  # readiness check used by both installers, so a dead file outliving the service
+  # makes the next install's verdict unreliable. Remove it once nothing owns it.
+  if [ -S "$(sv_socket)" ]; then
+    local waited=0
+    while [ "$waited" -lt 20 ] && [ -n "$(sv_socket_owner_pids)" ]; do
+      sleep 0.25
+      waited=$((waited + 1))
+    done
+    run rm -f "$(sv_socket)"
+    say "removed the leftover socket $(sv_socket)"
+  fi
 
   step "binaries"
   local bin; bin="$(sv_bin_dir)"

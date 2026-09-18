@@ -61,6 +61,10 @@ while [ "$#" -gt 0 ]; do
 done
 
 sv_load_conf
+# Hand this build's version to every child process as well as to service.conf. The
+# daemon reports it in `status`, and one started before the file is written (or from a
+# checkout whose conf is from an older install) would otherwise answer "unknown".
+export SENSENOVA_VERSION="$SV_VERSION"
 
 # Previous layout: everything (weights, binaries, images, config) in one
 # directory. Detected and migrated below; overridable for unusual setups.
@@ -393,6 +397,10 @@ export SENSENOVA_HOME="$(sv_home)"
 export SENSENOVA_MODELS="$(sv_models)"
 export SENSENOVA_OUT="$(sv_out_dir)"
 export SENSENOVA_SOCKET="$(sv_socket)"
+# The prefix and the label too: the front end this wrapper starts reads them to find
+# the daemon and the launchd job.
+export SENSENOVA_PREFIX="$(sv_prefix)"
+export SENSENOVA_LABEL="$(sv_label)"
 exec "$(sv_bin_dir)/$product" "\$@"
 SHIM
     chmod 0755 "$LEGACY_HOME/bin/$product"
@@ -465,12 +473,21 @@ PLIST
   # front end before this install keeps the socket (the launched job then exits 3
   # without binding), so the install can look perfect while every answer still comes
   # from the previous binary. `sv_service_stop` reaps it, but say so if it survived.
+  #
+  # "It answered without a version" and "it did not answer" are different things, and
+  # the second one used to be reported as if it were the first: `sv_status` prints
+  # "daemon unreachable" and exits 1, which this check read as a version mismatch.
   local status_out serving
-  status_out="$(sv_status 2>/dev/null || true)"
-  if [ -n "$status_out" ]; then
+  if sv_socket_listening; then
+    status_out="$(sv_status 2>/dev/null || true)"
     serving="$(printf '%s\n' "$status_out" | awk -F= '$1=="project_version"{print $2}')"
-    [ "$serving" = "$SV_VERSION" ] \
-      || warn "the daemon answering on $(sv_socket) is ${serving:-an older build}, not $SV_VERSION — run: sensenova-u1 restart"
+    if [ "$serving" = "$SV_VERSION" ]; then
+      hint "daemon $serving is serving pid $(printf '%s\n' "$status_out" | awk -F= '$1=="pid"{print $2}')"
+    else
+      warn "the daemon answering on $(sv_socket) is ${serving:-an older build}, not $SV_VERSION — run: sensenova-u1 restart"
+    fi
+  else
+    warn "nothing is answering on $(sv_socket) yet — the launchd job starts it on demand; check $(sv_log)"
   fi
 }
 
@@ -545,6 +562,24 @@ summary() {
   say "  models    $(sv_models)"
   say "  output    $(sv_out_dir)"
   say "  logs      $(sv_log)"
+  # A non-default home is invisible to a later shell: the CLI resolves the layout
+  # from the environment and from <home>/service.conf, and with --home that file is
+  # not where the defaults look. Say so here rather than letting `sensenova-u1 status`
+  # report a different (or missing) service afterwards.
+  if [ "$(sv_home)" != "$SV_DEFAULT_HOME" ] || [ "$(sv_prefix)" != "$SV_DEFAULT_PREFIX" ]; then
+    say ""
+    say "Note: this install is not in the default location, so a new shell needs the"
+    say "      layout in its environment before sensenova-u1 finds it (the MCP entries"
+    say "      written for the clients already carry it):"
+    # Plain `if`s, not `[ … ] && …`: with `set -e` a false test as the last command of
+    # the block would end the install here.
+    if [ "$(sv_home)" != "$SV_DEFAULT_HOME" ]; then
+      say "        export SENSENOVA_HOME=\"$(sv_home)\""
+    fi
+    if [ "$(sv_prefix)" != "$SV_DEFAULT_PREFIX" ]; then
+      say "        export SENSENOVA_PREFIX=\"$(sv_prefix)\""
+    fi
+  fi
   if [ -d "$LEGACY_HOME/bin" ] && [ "$DRY_RUN" = "0" ]; then
     say ""
     say "Note: $LEGACY_HOME keeps compatibility wrappers for MCP clients wired"
