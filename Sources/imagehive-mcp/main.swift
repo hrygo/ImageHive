@@ -1,8 +1,8 @@
-// sensenova-mcp - stdio MCP front end for the resident SenseNova-U1.5 service.
+// imagehive-mcp - stdio MCP front end for the resident imagehive service.
 //
 // Local addition (not upstream). This process is deliberately stateless and
 // never touches the weights: it speaks MCP on stdio and forwards every call
-// over the unix-domain socket owned by `sensenova-served`, which is what
+// over the unix-domain socket owned by `imagehived`, which is what
 // actually holds the single resident copy of the model. Launching a second MCP
 // client therefore costs one small process, not another 34 GB of weights.
 //
@@ -11,11 +11,11 @@
 // envelope fields (resultType / ttlMs / cacheScope) once a client has shown it
 // speaks that revision.
 //
-// Environment: SENSENOVA_HOME, SENSENOVA_SOCKET, SENSENOVA_SERVED_BIN.
+// Environment: IMAGEHIVE_HOME, IMAGEHIVE_SOCKET, IMAGEHIVE_DAEMON_BIN.
 
 import Foundation
 
-/// The project version — `cli/lib/common.sh`'s `SV_VERSION`, written into
+/// The project version — `cli/lib/common.sh`'s `IH_VERSION`, written into
 /// `service.conf` by install.sh. Reported here and in `serverInfo` so a client log
 /// says which build answered; it used to print `0.1.0`, a number that matched no
 /// release. Same rule as the daemon; `unknown` when nothing says otherwise.
@@ -32,24 +32,24 @@ func confValue(_ key: String, in path: String) -> String? {
 
 let earlyHome = ProcessInfo.processInfo.environment["HOME"]
     ?? FileManager.default.homeDirectoryForCurrentUser.path
-let serviceVersion = ProcessInfo.processInfo.environment["SENSENOVA_VERSION"]
-    ?? confValue("SENSENOVA_VERSION", in: ProcessInfo.processInfo.environment["SENSENOVA_CONF"]
-        ?? "\(ProcessInfo.processInfo.environment["SENSENOVA_HOME"] ?? "\(earlyHome)/Library/Application Support/SenseNovaU1")/service.conf")
+let serviceVersion = ProcessInfo.processInfo.environment["IMAGEHIVE_VERSION"]
+    ?? confValue("IMAGEHIVE_VERSION", in: ProcessInfo.processInfo.environment["IMAGEHIVE_CONF"]
+        ?? "\(ProcessInfo.processInfo.environment["IMAGEHIVE_HOME"] ?? "\(earlyHome)/Library/Application Support/ImageHive")/service.conf")
     ?? "unknown"
 let arguments = Array(CommandLine.arguments.dropFirst())
 if arguments.contains("--version") || arguments.contains("-v") {
-    print("sensenova-mcp \(serviceVersion)")
+    print("imagehive-mcp \(serviceVersion)")
     exit(0)
 }
 if arguments.contains("--help") || arguments.contains("-h") {
     print("""
-    sensenova-mcp \(serviceVersion) — stdio MCP front end for the local SenseNova-U1.5 image service
+    imagehive-mcp \(serviceVersion) — stdio MCP front end for the local imagehive service
 
-    Speaks MCP on stdin/stdout and forwards to the resident sensenova-served daemon,
+    Speaks MCP on stdin/stdout and forwards to the resident imagehived daemon,
     starting it on demand. No arguments are needed; MCP clients launch it directly.
 
-    Environment: SENSENOVA_HOME, SENSENOVA_SOCKET, SENSENOVA_SERVED_BIN,
-    SENSENOVA_MODELS, SENSENOVA_OUT.
+    Environment: IMAGEHIVE_HOME, IMAGEHIVE_SOCKET, IMAGEHIVE_DAEMON_BIN,
+    IMAGEHIVE_MODELS, IMAGEHIVE_OUT.
     """)
     exit(0)
 }
@@ -59,30 +59,30 @@ if arguments.contains("--help") || arguments.contains("-h") {
 let environment = ProcessInfo.processInfo.environment
 // $HOME first, then the passwd entry — same rule as the daemon and the CLI.
 let userHome = environment["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
-let homePath = environment["SENSENOVA_HOME"]
-    ?? "\(userHome)/Library/Application Support/SenseNovaU1"
-let socketPath = environment["SENSENOVA_SOCKET"] ?? "\(homePath)/served.sock"
-/// Where the daemon lives. `SENSENOVA_SERVED_BIN` is what the installer writes into
+let homePath = environment["IMAGEHIVE_HOME"]
+    ?? "\(userHome)/Library/Application Support/ImageHive"
+let socketPath = environment["IMAGEHIVE_SOCKET"] ?? "\(homePath)/imagehived.sock"
+/// Where the daemon lives. `IMAGEHIVE_DAEMON_BIN` is what the installer writes into
 /// every client entry, so it wins. Next to this front end is the next best answer
 /// and the one that cannot be wrong — the two binaries are installed into the same
 /// directory — whereas the prefix-based default is wrong for every install that used
-/// `--prefix`: a front end launched without the environment (a plain `sensenova-u1
-/// status`) then looked under `~/.local/share` and reported "sensenova-served not
+/// `--prefix`: a front end launched without the environment (a plain `imagehive
+/// status`) then looked under `~/.local/share` and reported "imagehived not
 /// found" on an install that was perfectly fine.
-let servedBinaryPath: String = {
-    if let explicit = environment["SENSENOVA_SERVED_BIN"], !explicit.isEmpty { return explicit }
+let daemonBinaryPath: String = {
+    if let explicit = environment["IMAGEHIVE_DAEMON_BIN"], !explicit.isEmpty { return explicit }
     if let here = Bundle.main.executableURL?.resolvingSymlinksInPath().deletingLastPathComponent() {
-        let beside = here.appendingPathComponent("sensenova-served").path
+        let beside = here.appendingPathComponent("imagehived").path
         if FileManager.default.isExecutableFile(atPath: beside) { return beside }
     }
-    return "\(environment["SENSENOVA_PREFIX"] ?? "\(userHome)/.local")/share/sensenova-u1/bin/sensenova-served"
+    return "\(environment["IMAGEHIVE_PREFIX"] ?? "\(userHome)/.local")/share/imagehive/bin/imagehived"
 }()
 
 let latestRevision = "2026-07-28"
 let legacyRevision = "2025-11-25"
 let supportedRevisions = [latestRevision, legacyRevision]
-let serverName = "sensenova-u1"
-let serverTitle = "SenseNova-U1.5 local image service"
+let serverName = "imagehive"
+let serverTitle = "ImageHive — resident local image service"
 let serverVersion = "1.0.0"
 let listTTLms = 60_000
 
@@ -92,7 +92,7 @@ let listTTLms = 60_000
 var modernEnvelope = false
 
 func log(_ message: String) {
-    FileHandle.standardError.write("sensenova-mcp: \(message)\n".data(using: .utf8)!)
+    FileHandle.standardError.write("imagehive-mcp: \(message)\n".data(using: .utf8)!)
 }
 
 let serverInstructions = """
@@ -156,7 +156,7 @@ func writeAll(_ fd: Int32, _ data: Data) -> Bool {
     }
 }
 
-/// Talks newline-delimited JSON to `sensenova-served`, spawning it on demand.
+/// Talks newline-delimited JSON to `imagehived`, spawning it on demand.
 final class DaemonClient {
     private var fd: Int32 = -1
     private var pending = Data()
@@ -184,29 +184,29 @@ final class DaemonClient {
         return true
     }
 
-    private func spawnServed() {
+    private func spawnDaemon() {
         guard !spawned else { return }
         spawned = true
-        guard FileManager.default.fileExists(atPath: servedBinaryPath) else {
-            spawnError = "the local image service is not installed: no sensenova-served at "
-                + "\(servedBinaryPath) — run install.sh"
+        guard FileManager.default.fileExists(atPath: daemonBinaryPath) else {
+            spawnError = "the local image service is not installed: no imagehived at "
+                + "\(daemonBinaryPath) — run install.sh"
             log(spawnError!)
             return
         }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: servedBinaryPath)
+        process.executableURL = URL(fileURLWithPath: daemonBinaryPath)
         var env = ProcessInfo.processInfo.environment
-        env["SENSENOVA_HOME"] = homePath
-        env["SENSENOVA_SOCKET"] = socketPath
+        env["IMAGEHIVE_HOME"] = homePath
+        env["IMAGEHIVE_SOCKET"] = socketPath
         process.environment = env
         // The daemon outlives this front end, so its log lines go to a file
         // rather than to a stderr pipe that will be closed when we exit.
         // $HOME first, like every other path here: a sandboxed or overridden HOME
         // must not write its daemon log into the real user's log directory.
         let logDirectory = URL(fileURLWithPath: userHome)
-            .appendingPathComponent("Library/Logs/SenseNovaU1")
+            .appendingPathComponent("Library/Logs/ImageHive")
         try? FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
-        let logPath = logDirectory.appendingPathComponent("served.log").path
+        let logPath = logDirectory.appendingPathComponent("imagehived.log").path
         daemonLogPath = logPath
         if !FileManager.default.fileExists(atPath: logPath) {
             FileManager.default.createFile(atPath: logPath, contents: nil)
@@ -219,9 +219,9 @@ final class DaemonClient {
         do {
             try process.run()
             child = process
-            log("started sensenova-served (pid \(process.processIdentifier))")
+            log("started imagehived (pid \(process.processIdentifier))")
         } catch {
-            spawnError = "could not start sensenova-served: \(error)"
+            spawnError = "could not start imagehived: \(error)"
             log(spawnError!)
         }
     }
@@ -235,11 +235,11 @@ final class DaemonClient {
         guard socketPath.utf8.count < 104 else {
             throw DaemonError(description: """
                 socket path is too long: \(socketPath.utf8.count) bytes, macOS allows 103.
-                Point SENSENOVA_SOCKET (or SENSENOVA_HOME) at something shorter.
+                Point IMAGEHIVE_SOCKET (or IMAGEHIVE_HOME) at something shorter.
                 """)
         }
         if connectOnce() { return }
-        spawnServed()
+        spawnDaemon()
         // Nothing to wait for: the process never came up, so the 30 s poll below
         // would only delay the same answer.
         if let spawnError { throw DaemonError(description: spawnError) }
@@ -249,8 +249,8 @@ final class DaemonClient {
             if connectOnce() { return }
         }
         throw DaemonError(description: """
-            sensenova-served did not answer on \(socketPath) within 30s (binary \
-            \(servedBinaryPath)). Its log explains why: \(daemonLogPath ?? "(no log path)")
+            imagehived did not answer on \(socketPath) within 30s (binary \
+            \(daemonBinaryPath)). Its log explains why: \(daemonLogPath ?? "(no log path)")
             """)
     }
 
@@ -273,18 +273,18 @@ final class DaemonClient {
         var request = try JSONSerialization.data(withJSONObject: payload)
         request.append(0x0A)
         guard writeAll(fd, request) else {
-            throw DaemonError(description: "write to sensenova-served failed")
+            throw DaemonError(description: "write to imagehived failed")
         }
         guard let line = readMessage() else {
             throw DaemonError(description: """
                 the local image service stopped while this request was running — it was \
                 restarted, stopped or crashed. An image is written before the reply is sent, \
                 so this request may have left a file behind even though it failed; check the \
-                output directory. Run `sensenova-u1 status` to see where the service is.
+                output directory. Run `imagehive status` to see where the service is.
                 """)
         }
         guard let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else {
-            throw DaemonError(description: "unreadable response from sensenova-served")
+            throw DaemonError(description: "unreadable response from imagehived")
         }
         return object
     }
@@ -375,7 +375,7 @@ func runManagementSwitch(_ flag: String) {
         print("project_version=\((status["project_version"] as? String) ?? "unknown")")
         print("protocol=\(status["protocol"] as? Int ?? 0)")
         if let when = status["last_request_at"] as? String { print("last_request_at=\(when)") }
-        // Live progress, so `sensenova-u1 status` is useful while it runs rather than
+        // Live progress, so `imagehive status` is useful while it runs rather than
         // just saying inflight=1.
         if let current = status["current"] as? [String: Any] {
             print("current=\(current["tool"] as? String ?? "job") "

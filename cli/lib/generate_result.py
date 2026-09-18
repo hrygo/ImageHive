@@ -30,7 +30,7 @@ def result_of(path):
             continue
         if isinstance(envelope, dict) and "result" in envelope:
             return envelope["result"]
-    print("no answer from the local image service — is it installed? (sensenova-u1 doctor)",
+    print("no answer from the local image service — is it installed? (imagehive doctor)",
           file=sys.stderr)
     sys.exit(2)
 

@@ -17,7 +17,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QUICK=0
 for arg in "$@"; do [ "$arg" = "--quick" ] && QUICK=1; done
 
-work="$(mktemp -d /tmp/snv-cli.XXXXXX)"
+work="$(mktemp -d /tmp/ih-cli.XXXXXX)"
 daemon_pid=""
 cleanup() {
   [ -n "$daemon_pid" ] && { kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true; }
@@ -28,20 +28,23 @@ trap cleanup EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 ok()   { printf '   %s\n' "$*"; }
 
-served="$REPO_DIR/.build/release/sensenova-served"
-mcp="$REPO_DIR/.build/release/sensenova-mcp"
-[ -x "$served" ] || fail "sensenova-served not found — run: swift build -c release"
-[ -x "$mcp" ] || fail "sensenova-mcp not found — run: swift build -c release"
+served="$REPO_DIR/.build/release/imagehived"
+mcp="$REPO_DIR/.build/release/imagehive-mcp"
+[ -x "$served" ] || fail "imagehived not found — run: swift build -c release"
+[ -x "$mcp" ] || fail "imagehive-mcp not found — run: swift build -c release"
 
 # The CLI finds the front end through PREFIX, so point a throwaway prefix at the
 # binaries this checkout just built.
-mkdir -p "$work/prefix/share/sensenova-u1/bin" "$work/home" "$work/out"
-ln -sf "$served" "$work/prefix/share/sensenova-u1/bin/sensenova-served"
-ln -sf "$mcp" "$work/prefix/share/sensenova-u1/bin/sensenova-mcp"
+mkdir -p "$work/prefix/share/imagehive/bin" "$work/home" "$work/out"
+ln -sf "$served" "$work/prefix/share/imagehive/bin/imagehived"
+ln -sf "$mcp" "$work/prefix/share/imagehive/bin/imagehive-mcp"
 
-# Whatever the installed service uses is what this test can run.
-host_home="$HOME/Library/Application Support/SenseNovaU1"
-models_root="$(awk -F= '/^SENSENOVA_MODELS=/{v=$2; gsub(/^'\''|'\''$/,"",v); print v}' \
+# Whatever the installed service uses is what this test can run. The pre-0.6 app
+# home is in the list because a machine that has not run the 0.6 install keeps its
+# service there, and this test reads the real artifacts rather than downloading any.
+host_home="$HOME/Library/Application Support/ImageHive"
+[ -f "$host_home/config.json" ] || host_home="$HOME/Library/Application Support/SenseNovaU1"
+models_root="$(awk -F= '/^(IMAGEHIVE|SENSENOVA)_MODELS=/{v=$2; gsub(/^'\''|'\''$/,"",v); print v}' \
   "$host_home/service.conf" 2>/dev/null || true)"
 [ -n "$models_root" ] || models_root="$host_home/models"
 artifact="$(python3 -c '
@@ -57,13 +60,13 @@ path = value if os.path.isabs(value) else os.path.join(sys.argv[2], value)
 print(path if os.path.exists(os.path.join(path, "config.json")) else "")
 ' "$host_home/config.json" "$models_root" 2>/dev/null || true)"
 
-export SENSENOVA_HOME="$work/home"
-export SENSENOVA_PREFIX="$work/prefix"
-export SENSENOVA_SOCKET="$work/served.sock"
-export SENSENOVA_OUT="$work/out"
-export SENSENOVA_QUALITY_ARTIFACT="${artifact:-$work/missing-quality}"
-export SENSENOVA_FAST_ARTIFACT="$work/missing-fast"
-cli=(bash "$REPO_DIR/cli/sensenova-u1")
+export IMAGEHIVE_HOME="$work/home"
+export IMAGEHIVE_PREFIX="$work/prefix"
+export IMAGEHIVE_SOCKET="$work/imagehived.sock"
+export IMAGEHIVE_OUT="$work/out"
+export IMAGEHIVE_QUALITY_ARTIFACT="${artifact:-$work/missing-quality}"
+export IMAGEHIVE_FAST_ARTIFACT="$work/missing-fast"
+cli=(bash "$REPO_DIR/cli/imagehive")
 
 echo "== help and argument handling (no service needed)"
 # Captured, not piped into `grep -q`: grep exiting on the first match kills the
@@ -97,7 +100,7 @@ esac
 # socket's life and death — and only the three generation blocks need weights. The
 # quick run therefore covers the daemon-side checks too (CI runs only --quick).
 have_model=1
-if [ "$QUICK" = "1" ] || [ ! -f "$SENSENOVA_QUALITY_ARTIFACT/config.json" ]; then
+if [ "$QUICK" = "1" ] || [ ! -f "$IMAGEHIVE_QUALITY_ARTIFACT/config.json" ]; then
   have_model=0
 fi
 
@@ -106,14 +109,14 @@ echo "== the service the CLI talks to"
 # the built-in defaults, so nothing else in `doctor` looks wrong; before this check
 # existed a truncated file, a type-wrong `ttl_seconds` and a 000-mode file all ran
 # the defaults with no trace anywhere. (smoke.sh asserts the daemon's own side.)
-printf '{"ttl_seconds": "600",\n' > "$SENSENOVA_HOME/config.json"
+printf '{"ttl_seconds": "600",\n' > "$IMAGEHIVE_HOME/config.json"
 "$served" >/dev/null 2>"$work/daemon.log" &
 daemon_pid=$!
 # Detach from this shell's job table: bash otherwise prints its own
 # "Terminated: 15" line when `stop` kills it. The pid is still ours to kill.
 disown "$daemon_pid" 2>/dev/null || true
-for _ in $(seq 1 60); do [ -S "$SENSENOVA_SOCKET" ] && break; sleep 0.25; done
-[ -S "$SENSENOVA_SOCKET" ] || fail "the daemon did not bind $SENSENOVA_SOCKET"
+for _ in $(seq 1 60); do [ -S "$IMAGEHIVE_SOCKET" ] && break; sleep 0.25; done
+[ -S "$IMAGEHIVE_SOCKET" ] || fail "the daemon did not bind $IMAGEHIVE_SOCKET"
 
 echo "== doctor reports a config.json whose settings are being ignored"
 doctor_text="$("${cli[@]}" doctor 2>&1 || true)"
@@ -121,7 +124,7 @@ case "$doctor_text" in
   *"config.json is not valid JSON"*) ok "flagged, where it used to print a ✓" ;;
   *) fail "doctor did not flag the malformed config.json: $(printf '%s\n' "$doctor_text" | grep config.json)" ;;
 esac
-rm -f "$SENSENOVA_HOME/config.json"
+rm -f "$IMAGEHIVE_HOME/config.json"
 
 echo "== what the service accepts"
 options_text="$("${cli[@]}" options)"
@@ -185,7 +188,7 @@ echo "== arguments with the wrong JSON type are refused, not silently defaulted"
 # Measured before this check existed: `"width":"512"` rendered 1024x1024,
 # `"steps":"4"` ran 50 steps and `"seed":"126"` produced a *random* seed — a caller
 # comparing two runs would never learn that its settings had been dropped.
-probe() { python3 "$REPO_DIR/Tests/socket_probe.py" "$SENSENOVA_SOCKET" "$1"; }
+probe() { python3 "$REPO_DIR/Tests/socket_probe.py" "$IMAGEHIVE_SOCKET" "$1"; }
 # `status` indents the key=value block, so match the field anywhere in the line.
 loads() { "${cli[@]}" status | grep -o 'loads_total=[0-9]*' | cut -d= -f2; }
 loads_before="$(loads)"
@@ -222,7 +225,7 @@ case "$missing_reply" in *"no such image"*) ok "$missing_reply" ;;
 esac
 
 echo "== a request with no trailing newline is logged, not silently dropped"
-python3 "$REPO_DIR/Tests/socket_probe.py" --partial "$SENSENOVA_SOCKET" '{"cmd":"status"}' >/dev/null
+python3 "$REPO_DIR/Tests/socket_probe.py" --partial "$IMAGEHIVE_SOCKET" '{"cmd":"status"}' >/dev/null
 for _ in $(seq 1 20); do
   grep -q "no trailing newline" "$work/daemon.log" 2>/dev/null && break
   sleep 0.25
@@ -258,7 +261,7 @@ daemon_pid=""
 # Ask the library the CLI itself uses, so the assertion is about the same
 # definition of "still owned" that `stop` reaps by.
 socket_owners() {
-  bash -c '. "$1/cli/lib/common.sh"; sv_socket_owner_pids' _ "$REPO_DIR" 2>/dev/null || true
+  bash -c '. "$1/cli/lib/common.sh"; ih_socket_owner_pids' _ "$REPO_DIR" 2>/dev/null || true
 }
 for _ in $(seq 1 20); do
   [ -z "$(socket_owners)" ] && break
@@ -267,7 +270,7 @@ done
 [ -z "$(socket_owners)" ] || fail "the socket is still owned after stop: $(socket_owners) (pid $daemon_pid)"
 # The daemon unlinks its socket on SIGTERM. Without that, the file outlives the
 # process and every "is it up?" check that looks at the file alone says yes.
-[ -S "$SENSENOVA_SOCKET" ] && fail "the stopped daemon left $SENSENOVA_SOCKET behind"
+[ -S "$IMAGEHIVE_SOCKET" ] && fail "the stopped daemon left $IMAGEHIVE_SOCKET behind"
 ok "the socket was handed back and removed"
 
 if [ "$have_model" = "1" ]; then echo "PASS (cli)"; else echo "PASS (cli, protocol only)"; fi

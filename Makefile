@@ -1,16 +1,16 @@
 # Convenience targets. The installers are the source of truth; these just drive them.
 
 SHELL := /bin/bash
-LABEL ?= local.sensenova-u1
+LABEL ?= local.imagehive
 # The project's own version (cli/lib/common.sh is the single source of truth);
 # the upstream git tag is recorded as a build stamp instead, so a tarball is
 # never mistaken for an upstream release.
-VERSION := $(shell sed -n 's/^SV_VERSION="\(.*\)"/\1/p' cli/lib/common.sh)
+VERSION := $(shell sed -n 's/^IH_VERSION="\(.*\)"/\1/p' cli/lib/common.sh)
 REVISION := $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
-NAME := sensenova-u1-$(VERSION)-macos-arm64
+NAME := imagehive-$(VERSION)-macos-arm64
 # A version-independent copy of the same archive, so a documented one-liner
 # (`.../releases/latest/download/<STABLE>.tar.gz`) never goes stale.
-STABLE := sensenova-u1-macos-arm64
+STABLE := imagehive-macos-arm64
 
 .PHONY: help build install uninstall test test-quick doctor release release-verify clean distclean
 
@@ -18,7 +18,7 @@ help:
 	@echo "make build       build both products (release)"
 	@echo "make install     build, install, restart the service (keeps existing models)"
 	@echo "make test        smoke test: protocol + shared-weights assertions"
-	@echo "make test-quick  protocol only, no model needed"
+	@echo "make test-quick  protocol + the 0.6 rename, no model needed"
 	@echo "make doctor      check the installed service"
 	@echo "make release     dist/ tarball a user can install without Xcode"
 	@echo "make release-verify  install that tarball into a sandbox HOME and check it"
@@ -26,8 +26,8 @@ help:
 	@echo "make clean       swift package clean"
 
 build:
-	swift build -c release --product sensenova-served
-	swift build -c release --product sensenova-mcp
+	swift build -c release --product imagehived
+	swift build -c release --product imagehive-mcp
 
 install: build
 	./install.sh --model none --clients none --yes
@@ -38,13 +38,15 @@ uninstall:
 test: build
 	Tests/smoke.sh
 	Tests/cli.sh
+	Tests/rename.sh
 
 test-quick: build
 	Tests/smoke.sh --quick
 	Tests/cli.sh --quick
+	Tests/rename.sh
 
 doctor:
-	./cli/sensenova-u1 doctor
+	./cli/imagehive doctor
 
 # What a non-developer needs: the two binaries, the MLX bundles, and everything
 # the installer and the docs read (cli/ is sourced by install.sh, so a tarball
@@ -53,12 +55,16 @@ doctor:
 release: build
 	@rm -rf "dist/$(NAME)"
 	@mkdir -p "dist/$(NAME)/prebuilt"
-	@cp .build/release/sensenova-served .build/release/sensenova-mcp "dist/$(NAME)/prebuilt/"
+	@cp .build/release/imagehived .build/release/imagehive-mcp "dist/$(NAME)/prebuilt/"
 	@for bundle in .build/release/*.bundle; do cp -R "$$bundle" "dist/$(NAME)/prebuilt/"; done
-	@cp install.sh uninstall.sh README.md README.zh-CN.md LICENSE NOTICE CHANGELOG.md "dist/$(NAME)/"
+	@# Everything the shipped README links to, so nobody following its doc index
+	@# inside the archive lands on a missing file (AGENTS.md and LOCAL-SERVICE.md
+	@# used to be repository-only).
+	@cp install.sh uninstall.sh README.md README.en.md AGENTS.md LOCAL-SERVICE.md \
+	     UPSTREAM-README.md LICENSE NOTICE CHANGELOG.md "dist/$(NAME)/"
 	@cp -R cli Docs "dist/$(NAME)/"
 	@rm -rf "dist/$(NAME)/cli/__pycache__" "dist/$(NAME)/cli/lib/__pycache__"
-	@printf 'sensenova-u1 %s\nrevision   %s\nbuilt      %s\nbuilt on   macOS %s %s\n' "$(VERSION)" "$(REVISION)" "$$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$$(sw_vers -productVersion)" "$$(uname -m)" > "dist/$(NAME)/BUILD-INFO.txt"
+	@printf 'imagehive %s\nrevision   %s\nbuilt      %s\nbuilt on   macOS %s %s\n' "$(VERSION)" "$(REVISION)" "$$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$$(sw_vers -productVersion)" "$$(uname -m)" > "dist/$(NAME)/BUILD-INFO.txt"
 	@( cd "dist/$(NAME)" && find . -type f ! -name 'SHA256SUMS' | LC_ALL=C sort \
 	     | xargs shasum -a 256 > SHA256SUMS )
 	@tar -C dist -czf "dist/$(NAME).tar.gz" "$(NAME)"

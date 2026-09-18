@@ -3,24 +3,39 @@
 
 A JSON round-trip would delete the user's comments, so the entry is inserted as
 a marked block inside the "mcp" object. `add` is idempotent: it removes every
-previous copy first — our marked block, and any other "sensenova" entry in the
+previous copy first — our marked block, and any other "imagehive" entry in the
 same object, hand-written ones included. Leaving those behind is not harmless:
 JSON keeps the last duplicate key, so a stale entry pointing at an old path
 silently wins over the one we just wrote.
 
+Blocks written before 0.6 (when this project was called `sensenova-u1`) carry
+different markers and a different key. They are recognised too, and for two
+reasons: a block we no longer recognise is a block `remove` can no longer clean
+up, and a leftover entry under the old key points at the old paths while the
+client shows every tool twice.
+
 Usage:
-  jsonc_edit.py add    <file> <mcp-binary> <home> <served-binary>
-  jsonc_edit.py remove <file>
-  jsonc_edit.py has    <file>
+  jsonc_edit.py add        <file> <mcp-binary> <home> <daemon-binary>
+  jsonc_edit.py remove     <file>
+  jsonc_edit.py has        <file>
+  jsonc_edit.py has-legacy <file>
 """
 
 import os
 import re
 import sys
 
-BEGIN = "// sensenova-u1:begin (managed by `sensenova-u1 clients`)"
-END = "// sensenova-u1:end"
-KEY = "sensenova"
+BEGIN = "// imagehive:begin (managed by `imagehive clients`)"
+END = "// imagehive:end"
+KEY = "imagehive"
+# 0.5.2 and earlier.
+LEGACY_BEGIN = "// sensenova-u1:begin (managed by `sensenova-u1 clients`)"
+LEGACY_END = "// sensenova-u1:end"
+LEGACY_KEY = "sensenova"
+
+_MANAGED = ((BEGIN, END), (LEGACY_BEGIN, LEGACY_END))
+_KEYS = (KEY, LEGACY_KEY)
+_ENDS = {END, LEGACY_END}
 
 
 def _depth_delta(line):
@@ -67,15 +82,28 @@ def _key_of(line):
 
 
 def _strip_managed(lines):
-    """Drop our marked blocks; returns (lines, removed_count)."""
-    out, skipping, removed = [], False, 0
+    """Drop our marked blocks, current and pre-0.6; (lines, removed_count).
+
+    The *closing* marker goes with the block, and a closing marker with no
+    opening one above it is dropped too. Both matter: an earlier version stopped
+    skipping at the end marker and then kept the line, so every wiring left one
+    more `// imagehive:end` behind than it removed — visible in the file, and one
+    more each time the client was wired (measured 2026-09-18 on an opencode
+    config that had been wired twice: two stray end markers).
+    """
+    out, skipping, end_marker, removed = [], False, None, 0
     for line in lines:
-        if BEGIN in line:
-            skipping, removed = True, removed + 1
-        if not skipping:
-            out.append(line)
-        if skipping and END in line:
-            skipping = False
+        if skipping:
+            if end_marker in line:
+                skipping, end_marker = False, None
+            continue
+        for begin, end in _MANAGED:
+            if begin in line:
+                skipping, end_marker, removed = True, end, removed + 1
+                break
+        else:
+            if line.strip() not in _ENDS:
+                out.append(line)
     return out, removed
 
 
@@ -135,15 +163,15 @@ def _normalise_commas(lines, open_index, close_index):
     return lines
 
 
-def _block(indent, comma, mcp, home, served):
+def _block(indent, comma, mcp, home, daemon):
     return [
         f"{indent}{BEGIN}",
         f'{indent}"{KEY}": {{',
         f'{indent}  "type": "local",',
         f'{indent}  "command": ["{mcp}"],',
         f'{indent}  "environment": {{',
-        f'{indent}    "SENSENOVA_HOME": "{home}",',
-        f'{indent}    "SENSENOVA_SERVED_BIN": "{served}"',
+        f'{indent}    "IMAGEHIVE_HOME": "{home}",',
+        f'{indent}    "IMAGEHIVE_DAEMON_BIN": "{daemon}"',
         f"{indent}  }},",
         f'{indent}  "enabled": true',
         f"{indent}}}{comma}",
@@ -151,7 +179,7 @@ def _block(indent, comma, mcp, home, served):
     ]
 
 
-def insert(path, mcp, home, served):
+def insert(path, mcp, home, daemon):
     lines = open(path).read().split("\n")
 
     # "mcp": {}  — an empty object written inline
@@ -167,7 +195,7 @@ def insert(path, mcp, home, served):
         sys.exit(f'no "mcp" object found in {path} (open opencode once, then re-run)')
     open_index, close_index = bounds
 
-    stale = [span for span in _entries(lines, open_index, close_index) if span[2] == KEY]
+    stale = [span for span in _entries(lines, open_index, close_index) if span[2] in _KEYS]
     if stale:
         lines = _drop_entries(lines, stale)
         close_index = _find_object(lines, "mcp")[1]
@@ -176,20 +204,23 @@ def insert(path, mcp, home, served):
     open_index, close_index = _find_object(lines, "mcp")
     indent = re.match(r"^(\s*)", lines[open_index]).group(1) + "  "
     rest = _entries(lines, open_index, close_index)
-    lines[open_index + 1:open_index + 1] = _block(indent, "," if rest else "", mcp, home, served)
+    lines[open_index + 1:open_index + 1] = _block(indent, "," if rest else "", mcp, home, daemon)
     open_index, close_index = _find_object(lines, "mcp")
     lines = _normalise_commas(lines, open_index, close_index)
 
     open(path, "w").write("\n".join(lines))
     if removed:
-        print(f"replaced {removed} previous sensenova entr{'y' if removed == 1 else 'ies'}", file=sys.stderr)
+        print(f"replaced {removed} previous imagehive entr{'y' if removed == 1 else 'ies'}", file=sys.stderr)
 
 
 def remove(path):
     if not os.path.exists(path):
         return
-    lines, removed = _strip_managed(open(path).read().split("\n"))
-    if not removed:
+    original = open(path).read().split("\n")
+    lines, _removed = _strip_managed(original)
+    # Compared by content, not by the block count: an orphan end marker is a
+    # change worth writing even though no whole block was removed.
+    if lines == original:
         return
     open(path, "w").write("\n".join(lines))
 
@@ -204,6 +235,8 @@ def main(argv):
         remove(path)
     elif action == "has":
         sys.exit(0 if os.path.exists(path) and BEGIN in open(path).read() else 1)
+    elif action == "has-legacy":
+        sys.exit(0 if os.path.exists(path) and LEGACY_BEGIN in open(path).read() else 1)
     else:
         sys.exit(__doc__)
 

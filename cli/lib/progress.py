@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Draw the running job's step progress on stderr, until killed.
 
-Started by `sensenova-u1 generate` only when stderr is a terminal. The request itself
+Started by `imagehive generate` only when stderr is a terminal. The request itself
 is one blocking call with no cancel, so the daemon's own counter (`status` →
 `current`) is the only live signal — and unlike everything else it answers while the
 model is busy, which is exactly when someone is wondering whether anything is

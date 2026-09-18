@@ -32,24 +32,28 @@ trap cleanup EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-served="$REPO_DIR/.build/release/sensenova-served"
-mcp="$REPO_DIR/.build/release/sensenova-mcp"
-[ -x "$served" ] || served="$(sv_served)"
-[ -x "$mcp" ] || mcp="$(sv_mcp)"
-[ -x "$served" ] || fail "sensenova-served not found — run: swift build -c release"
-[ -x "$mcp" ] || fail "sensenova-mcp not found — run: swift build -c release"
+served="$REPO_DIR/.build/release/imagehived"
+mcp="$REPO_DIR/.build/release/imagehive-mcp"
+[ -x "$served" ] || served="$(ih_daemon)"
+[ -x "$mcp" ] || mcp="$(ih_mcp)"
+[ -x "$served" ] || fail "imagehived not found — run: swift build -c release"
+[ -x "$mcp" ] || fail "imagehive-mcp not found — run: swift build -c release"
 
-export SENSENOVA_HOME="$work/home"
-export SENSENOVA_SOCKET="$work/served.sock"
-export SENSENOVA_OUT="$work/out"
-export SENSENOVA_TTL_SECONDS=30
-export SENSENOVA_MIN_WARM_SECONDS=5
-mkdir -p "$SENSENOVA_HOME"
+export IMAGEHIVE_HOME="$work/home"
+export IMAGEHIVE_SOCKET="$work/imagehived.sock"
+export IMAGEHIVE_OUT="$work/out"
+export IMAGEHIVE_TTL_SECONDS=30
+export IMAGEHIVE_MIN_WARM_SECONDS=5
+mkdir -p "$IMAGEHIVE_HOME"
 
-# Point the private daemon at whatever artifacts the installed service uses.
-host_home="$HOME/Library/Application Support/SenseNovaU1"
+# Point the private daemon at whatever artifacts the installed service uses. The
+# two fallbacks matter: a machine that has not run the 0.6 install keeps its
+# service in the pre-0.6 app home, and a pre-0.2 install kept everything in one
+# directory. A test that finds the weights nowhere is not testing anything.
+host_home="$HOME/Library/Application Support/ImageHive"
+[ -f "$host_home/config.json" ] || host_home="$HOME/Library/Application Support/SenseNovaU1"
 [ -f "$host_home/config.json" ] || host_home="$HOME/Models/SenseNova-U1.5"   # pre-0.2 layout
-models_root="$(awk -F= '/^SENSENOVA_MODELS=/{v=$2; gsub(/^'\''|'\''$/,"",v); print v}' \
+models_root="$(awk -F= '/^(IMAGEHIVE|SENSENOVA)_MODELS=/{v=$2; gsub(/^'\''|'\''$/,"",v); print v}' \
   "$host_home/service.conf" 2>/dev/null || true)"
 [ -n "$models_root" ] || models_root="$host_home/models"
 [ -d "$models_root" ] || models_root="$host_home/artifacts"                   # pre-0.2 layout
@@ -69,8 +73,8 @@ print(absolute(config.get("quality_artifact", "")))
 fi
 [ -n "$fast_dir" ] && [ -f "$fast_dir/config.json" ] || fast_dir=""
 [ -n "$quality_dir" ] && [ -f "$quality_dir/config.json" ] || quality_dir=""
-export SENSENOVA_FAST_ARTIFACT="${fast_dir:-$SENSENOVA_HOME/artifacts/missing-fast}"
-export SENSENOVA_QUALITY_ARTIFACT="${quality_dir:-$SENSENOVA_HOME/artifacts/missing-quality}"
+export IMAGEHIVE_FAST_ARTIFACT="${fast_dir:-$IMAGEHIVE_HOME/artifacts/missing-fast}"
+export IMAGEHIVE_QUALITY_ARTIFACT="${quality_dir:-$IMAGEHIVE_HOME/artifacts/missing-quality}"
 
 # Which artifact this host has installed decides what the generation assertions
 # can run on, and whether the single-artifact fallback is exercised. One artifact
@@ -117,21 +121,21 @@ echo "== daemon lifecycle"
 # A config.json that exists but cannot be parsed used to be indistinguishable from no
 # file at all: every setting in it was dropped and the daemon served the built-in
 # defaults in silence. It must say so, in its log and in the status a client reads.
-printf '{"ttl_seconds": "600",\n' > "$SENSENOVA_HOME/config.json"
+printf '{"ttl_seconds": "600",\n' > "$IMAGEHIVE_HOME/config.json"
 "$served" >/dev/null 2>"$work/daemon.log" &
 daemon_pid=$!
-for _ in $(seq 1 60); do [ -S "$SENSENOVA_SOCKET" ] && break; sleep 0.25; done
-[ -S "$SENSENOVA_SOCKET" ] || fail "daemon did not bind $SENSENOVA_SOCKET (see $work/daemon.log)"
+for _ in $(seq 1 60); do [ -S "$IMAGEHIVE_SOCKET" ] && break; sleep 0.25; done
+[ -S "$IMAGEHIVE_SOCKET" ] || fail "daemon did not bind $IMAGEHIVE_SOCKET (see $work/daemon.log)"
 for _ in $(seq 1 40); do
   grep -q "not valid JSON" "$work/daemon.log" 2>/dev/null && break
   sleep 0.25
 done
 grep -q "not valid JSON" "$work/daemon.log" \
   || fail "a malformed config.json produced no diagnostic: $(cat "$work/daemon.log")"
-echo "   $(grep -m1 'not valid JSON' "$work/daemon.log" | sed 's/^sensenova-served: //')"
-rm -f "$SENSENOVA_HOME/config.json"
+echo "   $(grep -m1 'not valid JSON' "$work/daemon.log" | sed 's/^imagehived: //')"
+rm -f "$IMAGEHIVE_HOME/config.json"
 
-second="$(SENSENOVA_SOCKET="$SENSENOVA_SOCKET" "$served" 2>&1 || true)"
+second="$(IMAGEHIVE_SOCKET="$IMAGEHIVE_SOCKET" "$served" 2>&1 || true)"
 case "$second" in *"another instance is live"*) echo "   second instance refused" ;; *) fail "second instance was not refused: $second";; esac
 
 status="$("$mcp" --status)"
@@ -174,7 +178,7 @@ done
 
 loads="$("$mcp" --status | awk -F= '$1=="loads_total"{print $2}')"
 [ "$loads" = "1" ] || fail "expected exactly one load for three concurrent clients, got $loads"
-residents="$(pgrep -f "sensenova-served" 2>/dev/null | wc -l | tr -d ' ' || true)"
+residents="$(pgrep -f "imagehived" 2>/dev/null | wc -l | tr -d ' ' || true)"
 [ "$residents" -ge 1 ] || fail "daemon disappeared"
 echo "   loads_total=$loads with three concurrent clients"
 

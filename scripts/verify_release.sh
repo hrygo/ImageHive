@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install a release tarball the way a user would, and check the result.
 #
-#   ./scripts/verify_release.sh dist/sensenova-u1-<version>-macos-arm64.tar.gz
+#   ./scripts/verify_release.sh dist/imagehive-<version>-macos-arm64.tar.gz
 #   make release-verify
 #
 # Everything happens inside a private HOME: the archive is verified against its
@@ -14,7 +14,7 @@
 # Expected: doctor reports "no model artifact installed" with status 1, because a
 # sandbox has no 11–33 GiB of weights. That is a pass here, not a failure.
 #
-# SENSENOVA_VERIFY_SKIP_SERVICE=1 stops after the install, for a headless box
+# IMAGEHIVE_VERIFY_SKIP_SERVICE=1 stops after the install, for a headless box
 # (a CI runner) where there is no GUI launchd domain to bootstrap into.
 
 set -euo pipefail
@@ -24,11 +24,11 @@ tarball="${1:-}"
 [ -f "$tarball" ] || { echo "no such tarball: $tarball" >&2; exit 2; }
 tarball="$(cd "$(dirname "$tarball")" && pwd)/$(basename "$tarball")"
 
-label="${SENSENOVA_VERIFY_LABEL:-local.sensenova-u1-verify}"
+label="${IMAGEHIVE_VERIFY_LABEL:-local.imagehive-verify}"
 # A short sandbox root on purpose: AF_UNIX socket paths are limited to 103 bytes,
 # and $TMPDIR on macOS is `/var/folders/...`, long enough to blow that budget once
 # a home directory is appended. A real home is short, so the sandbox mimics one.
-work="$(mktemp -d /tmp/snv-verify.XXXXXX)"
+work="$(mktemp -d /tmp/ih-verify.XXXXXX)"
 sandbox_home="$work/home"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -53,15 +53,15 @@ echo "== 1. the archive matches its checksum"
 ( cd "$(dirname "$tarball")" && shasum -a 256 -c "$(basename "$tarball").sha256" >/dev/null ) \
   || fail "archive does not match its .sha256"
 tar -xzf "$tarball" -C "$work"
-src="$(find "$work" -maxdepth 1 -type d -name 'sensenova-u1-*' | head -1)"
+src="$(find "$work" -maxdepth 1 -type d -name 'imagehive-*' | head -1)"
 [ -n "$src" ] || fail "the archive has no top-level directory"
 ( cd "$src" && shasum -a 256 -c SHA256SUMS >/dev/null ) || fail "SHA256SUMS does not match"
 ok "$(basename "$tarball") verified"
 
 echo "== 2. the archive is self-contained"
-for need in install.sh uninstall.sh README.md README.zh-CN.md LICENSE NOTICE CHANGELOG.md \
-            prebuilt/sensenova-served prebuilt/sensenova-mcp \
-            cli/sensenova-u1 cli/lib/common.sh cli/lib/models.sh cli/lib/clients.sh \
+for need in install.sh uninstall.sh README.md README.en.md LICENSE NOTICE CHANGELOG.md \
+            prebuilt/imagehived prebuilt/imagehive-mcp \
+            cli/imagehive cli/lib/common.sh cli/lib/models.sh cli/lib/clients.sh \
             cli/lib/generate_result.py cli/lib/progress.py \
             Docs/MODELS.md Docs/LAYOUT.md Docs/CLIENTS.md Docs/DISTRIBUTING.md \
             Docs/DISTRIBUTING.zh-CN.md Docs/TROUBLESHOOTING.md BUILD-INFO.txt; do
@@ -83,27 +83,27 @@ while IFS= read -r -d '' item; do
   xattr -w com.apple.quarantine "$aq" "$item" 2>/dev/null || skipped=$((skipped + 1))
 done < <(find "$src" -print0)
 [ "$skipped" = "0" ] || ok "$skipped read-only files refused the flag (harmless: they are not executables)"
-xattr -p com.apple.quarantine "$src/prebuilt/sensenova-served" >/dev/null 2>&1 \
+xattr -p com.apple.quarantine "$src/prebuilt/imagehived" >/dev/null 2>&1 \
   || fail "could not set the quarantine flag (the test would prove nothing)"
-ok "prebuilt/sensenova-served is quarantined"
+ok "prebuilt/imagehived is quarantined"
 
 echo "== 4. install it, with no Xcode and no Swift toolchain"
 mkdir -p "$sandbox_home"
 ( cd "$src" && HOME="$sandbox_home" bash ./install.sh \
     --skip-build --model none --clients none --label "$label" --yes ) \
   || fail "install.sh failed"
-for target in "$sandbox_home/.local/share/sensenova-u1/bin/sensenova-served" \
-              "$sandbox_home/.local/share/sensenova-u1/bin/sensenova-mcp" \
-              "$sandbox_home/.local/share/sensenova-u1/sensenova-u1" \
-              "$sandbox_home/.local/bin/sensenova-u1"; do
+for target in "$sandbox_home/.local/share/imagehive/bin/imagehived" \
+              "$sandbox_home/.local/share/imagehive/bin/imagehive-mcp" \
+              "$sandbox_home/.local/share/imagehive/imagehive" \
+              "$sandbox_home/.local/bin/imagehive"; do
   [ -e "$target" ] || fail "not installed: $target"
   xattr -p com.apple.quarantine "$target" >/dev/null 2>&1 \
     && fail "still quarantined after install (it would hang on first run): $target"
 done
 ok "binaries, bundles and the command are in place and unquarantined"
 
-if [ "${SENSENOVA_VERIFY_SKIP_SERVICE:-0}" = "1" ]; then
-  echo "== 5. skipping the service checks (SENSENOVA_VERIFY_SKIP_SERVICE=1)"
+if [ "${IMAGEHIVE_VERIFY_SKIP_SERVICE:-0}" = "1" ]; then
+  echo "== 5. skipping the service checks (IMAGEHIVE_VERIFY_SKIP_SERVICE=1)"
   echo
   echo "PASS: the release installs without a toolchain"
   exit 0
@@ -111,7 +111,7 @@ fi
 
 echo "== 5. the sandbox service answers"
 export HOME="$sandbox_home"
-status="$( "$sandbox_home/.local/bin/sensenova-u1" status 2>&1 )" || fail "status failed:
+status="$( "$sandbox_home/.local/bin/imagehive" status 2>&1 )" || fail "status failed:
 $status"
 case "$status" in *available_tiers=*) ok "$(printf '%s\n' "$status" | awk -F= '/available_tiers/{print "available_tiers="$2}')" ;;
   *) fail "status did not report available_tiers:
@@ -122,7 +122,7 @@ esac
 # default socket, which is a second copy of the weights. Both regressions were real
 # (measured 2026-09-18) before the layout was exported and the socket was unlinked on
 # SIGTERM.
-expected_version="$(sed -n 's/^SV_VERSION="\(.*\)"/\1/p' "$src/cli/lib/common.sh")"
+expected_version="$(sed -n 's/^IH_VERSION="\(.*\)"/\1/p' "$src/cli/lib/common.sh")"
 case "$status" in
   *"project_version=$expected_version"*) ok "the daemon answering is $expected_version" ;;
   *) fail "the daemon answering is not the installed build ($expected_version):
@@ -136,17 +136,17 @@ esac
 
 echo "== 6. doctor sees the real state of a model-less sandbox"
 doctor_rc=0
-doctor="$( "$sandbox_home/.local/bin/sensenova-u1" doctor 2>&1 )" || doctor_rc=$?
+doctor="$( "$sandbox_home/.local/bin/imagehive" doctor 2>&1 )" || doctor_rc=$?
 case "$doctor" in *"no model artifact installed"*) ok "doctor: no model artifact installed (exit $doctor_rc, expected)" ;;
   *) fail "doctor did not report the missing artifact:
 $doctor" ;;
 esac
 
 echo "== 7. a socket path that does not fit says so instead of failing silently"
-long_socket="$work/$(printf 'x%.0s' $(seq 1 90))/served.sock"   # 104+ bytes
+long_socket="$work/$(printf 'x%.0s' $(seq 1 90))/imagehived.sock"   # 104+ bytes
 long_log="$work/long-path.log"
-SENSENOVA_HOME="$sandbox_home" SENSENOVA_SOCKET="$long_socket" \
-  "$sandbox_home/.local/share/sensenova-u1/bin/sensenova-served" >/dev/null 2>"$long_log" || true
+IMAGEHIVE_HOME="$sandbox_home" IMAGEHIVE_SOCKET="$long_socket" \
+  "$sandbox_home/.local/share/imagehive/bin/imagehived" >/dev/null 2>"$long_log" || true
 case "$(cat "$long_log")" in
   *"socket path is too long"*) ok "the daemon explains a too-long socket path" ;;
   *) fail "expected a 'socket path is too long' diagnostic, got:

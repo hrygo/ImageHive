@@ -1,4 +1,5 @@
-// sensenova-served - resident SenseNova-U1.5 image service.
+// imagehived - the resident daemon behind imagehive: one copy of the weights,
+// one socket, every client served from it.
 //
 // Local addition (not upstream). One process owns the weights; clients talk to
 // it over a unix-domain socket using newline-delimited JSON, the same framing
@@ -12,10 +13,10 @@
 //   idle unload      - TTL after last use, with a minimum warm time
 //   observable       - loads_total / resident_tier / inflight / queue_depth
 //
-// Configuration: $SENSENOVA_HOME/config.json (see ServiceConfig below), with
-// environment variables (SENSENOVA_HOME, SENSENOVA_CONFIG, SENSENOVA_TTL_SECONDS,
-// SENSENOVA_MIN_WARM_SECONDS, SENSENOVA_SOCKET, SENSENOVA_MODELS, SENSENOVA_OUT,
-// SENSENOVA_FAST_ARTIFACT, SENSENOVA_QUALITY_ARTIFACT) overriding it. Both are optional: with neither,
+// Configuration: $IMAGEHIVE_HOME/config.json (see ServiceConfig below), with
+// environment variables (IMAGEHIVE_HOME, IMAGEHIVE_CONFIG, IMAGEHIVE_TTL_SECONDS,
+// IMAGEHIVE_MIN_WARM_SECONDS, IMAGEHIVE_SOCKET, IMAGEHIVE_MODELS, IMAGEHIVE_OUT,
+// IMAGEHIVE_FAST_ARTIFACT, IMAGEHIVE_QUALITY_ARTIFACT) overriding it. Both are optional: with neither,
 // the defaults below describe a stock `install.sh` layout.
 
 import CoreGraphics
@@ -32,7 +33,7 @@ let environmentForConfig = ProcessInfo.processInfo.environment
 /// an existing client would misread. Reported by `status` and `options`.
 let protocolVersion = 1
 
-/// The project version — `cli/lib/common.sh`'s `SV_VERSION`, which `install.sh`
+/// The project version — `cli/lib/common.sh`'s `IH_VERSION`, which `install.sh`
 /// writes into `service.conf`. Without the key (an install from before this key
 /// existed, or a bare `swift run` in a checkout) this says `unknown` rather than a
 /// number that belongs to nothing: it used to print `0.1.0`, which matched no
@@ -49,17 +50,17 @@ func confValue(_ key: String, in path: String) -> String? {
 }
 
 let userHomeEarly = environmentForConfig["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
-let projectVersion = environmentForConfig["SENSENOVA_VERSION"]
-    ?? confValue("SENSENOVA_VERSION", in: environmentForConfig["SENSENOVA_CONF"]
-        ?? "\(environmentForConfig["SENSENOVA_HOME"] ?? "\(userHomeEarly)/Library/Application Support/SenseNovaU1")/service.conf")
+let projectVersion = environmentForConfig["IMAGEHIVE_VERSION"]
+    ?? confValue("IMAGEHIVE_VERSION", in: environmentForConfig["IMAGEHIVE_CONF"]
+        ?? "\(environmentForConfig["IMAGEHIVE_HOME"] ?? "\(userHomeEarly)/Library/Application Support/ImageHive")/service.conf")
     ?? "unknown"
 
 if CommandLine.arguments.dropFirst().contains(where: { $0 == "--version" || $0 == "-v" }) {
-    print("sensenova-served \(projectVersion) (socket protocol \(protocolVersion))")
+    print("imagehived \(projectVersion) (socket protocol \(protocolVersion))")
     exit(0)
 }
 
-/// The knobs a user is allowed to turn, from $SENSENOVA_HOME/config.json:
+/// The knobs a user is allowed to turn, from $IMAGEHIVE_HOME/config.json:
 ///
 ///     {
 ///       "ttl_seconds": 600,
@@ -69,7 +70,7 @@ if CommandLine.arguments.dropFirst().contains(where: { $0 == "--version" || $0 =
 ///       "write_sidecar": true
 ///     }
 ///
-/// Artifact paths are relative to SENSENOVA_MODELS unless absolute. The file is
+/// Artifact paths are relative to IMAGEHIVE_MODELS unless absolute. The file is
 /// optional, and environment variables win over it, so `install.sh` can drive
 /// everything without writing one. Both tier keys are independent and optional:
 /// name what you installed and the daemon serves the other tier from it
@@ -147,21 +148,21 @@ struct ServiceConfig {
 // $HOME, so honouring it here keeps a sandboxed or overridden HOME consistent
 // instead of silently reaching back into the real user's app home.
 let userHome = userHomeEarly
-let home = URL(fileURLWithPath: environmentForConfig["SENSENOVA_HOME"]
-    ?? "\(userHome)/Library/Application Support/SenseNovaU1")
-let modelsRoot = URL(fileURLWithPath: environmentForConfig["SENSENOVA_MODELS"]
+let home = URL(fileURLWithPath: environmentForConfig["IMAGEHIVE_HOME"]
+    ?? "\(userHome)/Library/Application Support/ImageHive")
+let modelsRoot = URL(fileURLWithPath: environmentForConfig["IMAGEHIVE_MODELS"]
     ?? home.appendingPathComponent("models").path)
-let configURL = URL(fileURLWithPath: environmentForConfig["SENSENOVA_CONFIG"]
+let configURL = URL(fileURLWithPath: environmentForConfig["IMAGEHIVE_CONFIG"]
     ?? home.appendingPathComponent("config.json").path)
 let serviceConfig = ServiceConfig.load(from: configURL)
-let ttlSeconds = environmentForConfig["SENSENOVA_TTL_SECONDS"].flatMap(Double.init) ?? serviceConfig.ttlSeconds
-let minWarmSeconds = environmentForConfig["SENSENOVA_MIN_WARM_SECONDS"].flatMap(Double.init) ?? serviceConfig.minWarmSeconds
-let fastArtifact = environmentForConfig["SENSENOVA_FAST_ARTIFACT"] ?? serviceConfig.fastArtifact
-let qualityArtifact = environmentForConfig["SENSENOVA_QUALITY_ARTIFACT"] ?? serviceConfig.qualityArtifact
-let socketPath = environmentForConfig["SENSENOVA_SOCKET"]
-    ?? home.appendingPathComponent("served.sock").path
-let outDir = URL(fileURLWithPath: environmentForConfig["SENSENOVA_OUT"]
-    ?? "\(userHome)/Pictures/SenseNovaU1")
+let ttlSeconds = environmentForConfig["IMAGEHIVE_TTL_SECONDS"].flatMap(Double.init) ?? serviceConfig.ttlSeconds
+let minWarmSeconds = environmentForConfig["IMAGEHIVE_MIN_WARM_SECONDS"].flatMap(Double.init) ?? serviceConfig.minWarmSeconds
+let fastArtifact = environmentForConfig["IMAGEHIVE_FAST_ARTIFACT"] ?? serviceConfig.fastArtifact
+let qualityArtifact = environmentForConfig["IMAGEHIVE_QUALITY_ARTIFACT"] ?? serviceConfig.qualityArtifact
+let socketPath = environmentForConfig["IMAGEHIVE_SOCKET"]
+    ?? home.appendingPathComponent("imagehived.sock").path
+let outDir = URL(fileURLWithPath: environmentForConfig["IMAGEHIVE_OUT"]
+    ?? "\(userHome)/Pictures/ImageHive")
 
 func artifactDir(_ tier: String) -> URL {
     let relative: String
@@ -231,7 +232,7 @@ func resolveTier(_ tier: String) -> String {
 /// rules hold no matter what is on the other end of the socket.
 enum RequestError {
     static func bad(_ message: String) -> NSError {
-        NSError(domain: "sensenova", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        NSError(domain: "imagehive", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }
 
@@ -574,8 +575,8 @@ func immediateAnswer(_ request: [String: Any]) -> [String: Any]? {
 /// the cfg, so "same prompt, same seed, different model" — the comparison this
 /// service exists to make possible — could only be asserted from memory.
 ///
-/// `"write_sidecar": false` in config.json (or `SENSENOVA_SIDECAR=0`) turns it off.
-let sidecarEnabled = (environmentForConfig["SENSENOVA_SIDECAR"].map { $0 != "0" })
+/// `"write_sidecar": false` in config.json (or `IMAGEHIVE_SIDECAR=0`) turns it off.
+let sidecarEnabled = (environmentForConfig["IMAGEHIVE_SIDECAR"].map { $0 != "0" })
     ?? (serviceConfig.writeSidecar ?? true)
 
 func sha256Hex(_ data: Data) -> String {
@@ -743,18 +744,18 @@ actor Core {
         }
         if let pending = pendingLoad {
             if pending.tier == tier { return try await pending.task.value }
-            throw NSError(domain: "sensenova", code: 4, userInfo: [NSLocalizedDescriptionKey:
+            throw NSError(domain: "imagehive", code: 4, userInfo: [NSLocalizedDescriptionKey:
                 "busy loading tier '\(pending.tier)'; retry once it settles"])
         }
         if model != nil { release() }
         let dir = artifactDir(tier)
         guard artifactReady(tier) else {
-            throw NSError(domain: "sensenova", code: 2, userInfo: [
+            throw NSError(domain: "imagehive", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: """
                 no model artifact installed: looked for \(artifactDir(wanted).path) and \
                 \(artifactDir(otherTier(wanted)).path) — download one with \
-                `sensenova-u1 models pull fast-4bit` (lightweight, 11 GiB) or \
-                `sensenova-u1 models pull quality-bf16` (33 GiB), or point \
+                `imagehive models pull fast-4bit` (lightweight, 11 GiB) or \
+                `imagehive models pull quality-bf16` (33 GiB), or point \
                 \(configURL.path) at an artifact you built
                 """])
         }
@@ -1062,7 +1063,7 @@ actor Core {
 // MARK: - helpers and socket plumbing
 
 func log(_ message: String) {
-    FileHandle.standardError.write("sensenova-served: \(message)\n".data(using: .utf8)!)
+    FileHandle.standardError.write("imagehived: \(message)\n".data(using: .utf8)!)
 }
 
 @discardableResult
@@ -1085,7 +1086,7 @@ func openListener(_ path: String) -> Int32? {
     // nothing in the log. Refusing up front turns a mystery into an instruction.
     guard path.utf8.count < 104 else {
         log("socket path is too long: \(path.utf8.count) bytes, macOS allows 103 (sun_path)")
-        log("set SENSENOVA_SOCKET to a shorter path, or move SENSENOVA_HOME somewhere shorter")
+        log("set IMAGEHIVE_SOCKET to a shorter path, or move IMAGEHIVE_HOME somewhere shorter")
         return nil
     }
     if FileManager.default.fileExists(atPath: path) {
@@ -1133,7 +1134,7 @@ signal(SIGPIPE, SIG_IGN)
 // `unlink(someSwiftString)` bridges to a temporary C string, which allocates, and a
 // signal handler must not allocate — the allocator may be mid-update when the signal
 // arrives. `strdup` is the last allocation these handlers ever need.
-let terminationNotice = strdup("sensenova-served: terminated by signal — socket removed\n")!
+let terminationNotice = strdup("imagehived: terminated by signal — socket removed\n")!
 let socketPathForSignal = strdup(socketPath)!
 for signalNumber in [SIGTERM, SIGINT] {
     signal(signalNumber) { _ in
@@ -1150,7 +1151,7 @@ guard let listenFD = openListener(socketPath) else { exit(3) }
 // Before the "listening" line, so the reason a setting did not take effect is in
 // the log ahead of the evidence that the daemon came up anyway.
 for warning in serviceConfig.warnings { log(warning) }
-log("sensenova-served \(projectVersion) listening on \(socketPath) "
+log("imagehived \(projectVersion) listening on \(socketPath) "
     + "(ttl \(Int(ttlSeconds))s, min warm \(Int(minWarmSeconds))s)")
 log("home \(home.path)")
 for tier in tierNames {
@@ -1170,7 +1171,7 @@ sweeper.start()
 /// written back through a serial queue so ordering stays intact.
 final class Connection {
     private let fd: Int32
-    private let writeQueue = DispatchQueue(label: "sensenova.write")
+    private let writeQueue = DispatchQueue(label: "imagehive.write")
     private let core: Core
 
     init(fd: Int32, core: Core) {

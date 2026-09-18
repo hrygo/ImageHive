@@ -56,7 +56,7 @@ jobs:
       # developer; a syntax error in one of them is a broken release.
       - name: Shell syntax
         run: |
-          for script in install.sh uninstall.sh cli/sensenova-u1 cli/lib/*.sh scripts/*.sh Tests/smoke.sh Tests/cli.sh; do
+          for script in install.sh uninstall.sh cli/imagehive cli/lib/*.sh scripts/*.sh Tests/*.sh; do
             bash -n "$script"
           done
           python3 -m py_compile cli/lib/*.py
@@ -81,12 +81,12 @@ jobs:
       # The launchd/service steps are skipped: runners have no GUI domain.
       - name: Install from the tarball without a toolchain
         env:
-          SENSENOVA_VERIFY_SKIP_SERVICE: "1"
+          IMAGEHIVE_VERIFY_SKIP_SERVICE: "1"
         run: bash scripts/verify_release.sh dist/*.tar.gz
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sensenova-u1-macos-arm64
+          name: imagehive-macos-arm64
           path: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256

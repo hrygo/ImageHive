@@ -6,39 +6,39 @@
 # Python, no conversion step and no Hugging Face login.
 
 # name|repo|tier|disk|peak|note
-SV_PRESETS=(
+IH_PRESETS=(
   "fast-4bit|mlx-community/SenseNova-U1.5-8B-MoT-8step-4bit|fast|11 GiB|14.8 GB|8-step distilled, 4-bit — the default: fastest, smallest"
   "fast-8bit|mlx-community/SenseNova-U1.5-8B-MoT-8step-8bit|fast|20 GiB|22.4 GB|8-step distilled, 8-bit — closest to the bf16 draw of the fast tier"
   "quality-bf16|mlx-community/SenseNova-U1.5-8B-MoT-bf16|quality|33 GiB|35.1 GB|50-step reference tier, also the tier used for editing and VQA"
 )
 
-sv_preset_names() {
+ih_preset_names() {
   local entry
-  for entry in "${SV_PRESETS[@]}"; do printf '%s\n' "${entry%%|*}"; done
+  for entry in "${IH_PRESETS[@]}"; do printf '%s\n' "${entry%%|*}"; done
 }
 
-sv_preset_entry() {
+ih_preset_entry() {
   local wanted="$1" entry
-  for entry in "${SV_PRESETS[@]}"; do
+  for entry in "${IH_PRESETS[@]}"; do
     [ "${entry%%|*}" = "$wanted" ] && { printf '%s\n' "$entry"; return 0; }
   done
   return 1
 }
 
-sv_preset_field() { # <preset> <1 repo|2 tier|3 disk|4 peak|5 note>
-  local entry; entry="$(sv_preset_entry "$1")" || return 1
+ih_preset_field() { # <preset> <1 repo|2 tier|3 disk|4 peak|5 note>
+  local entry; entry="$(ih_preset_entry "$1")" || return 1
   printf '%s\n' "$entry" | awk -F'|' -v n="$2" '{print $n}'
 }
 
-sv_preset_repo() { sv_preset_field "$1" 2; }
-sv_preset_tier() { sv_preset_field "$1" 3; }
+ih_preset_repo() { ih_preset_field "$1" 2; }
+ih_preset_tier() { ih_preset_field "$1" 3; }
 
-sv_preset_dir() { # absolute artifact directory for a preset
-  printf '%s\n' "$(sv_models)/$(sv_preset_repo "$1" | tr '/' '-')"
+ih_preset_dir() { # absolute artifact directory for a preset
+  printf '%s\n' "$(ih_models)/$(ih_preset_repo "$1" | tr '/' '-')"
 }
 
-sv_require_python() {
-  sv_have python3 || die "python3 is required for model downloads (install Xcode Command Line Tools: xcode-select --install)"
+ih_require_python() {
+  ih_have python3 || die "python3 is required for model downloads (install Xcode Command Line Tools: xcode-select --install)"
 }
 
 # --- source listing ----------------------------------------------------------
@@ -46,7 +46,7 @@ sv_require_python() {
 # Every listing prints "size<TAB>path" lines, skipping .gitattributes and the
 # repo README (harmless but not part of the artifact).
 
-sv_list_modelscope() {
+ih_list_modelscope() {
   local repo="$1" json
   json="$(curl -fsSL "https://modelscope.cn/api/v1/models/${repo}/repo/files?Revision=master&Recursive=true")" \
     || die "could not list ${repo} on ModelScope"
@@ -60,7 +60,7 @@ for f in json.load(sys.stdin)["Data"]["Files"]:
 '
 }
 
-sv_list_hf() {
+ih_list_hf() {
   local repo="$1" endpoint="${2:-https://huggingface.co}" json
   json="$(curl -fsSL "${endpoint}/api/models/${repo}?blobs=true")" \
     || die "could not list ${repo} at ${endpoint}"
@@ -74,15 +74,15 @@ for f in json.load(sys.stdin).get("siblings", []):
 '
 }
 
-sv_list_files() { # <repo> <source>
+ih_list_files() { # <repo> <source>
   case "$2" in
-    modelscope) sv_list_modelscope "$1" ;;
-    hf)         sv_list_hf "$1" "${HF_ENDPOINT:-https://huggingface.co}" ;;
+    modelscope) ih_list_modelscope "$1" ;;
+    hf)         ih_list_hf "$1" "${HF_ENDPOINT:-https://huggingface.co}" ;;
     *)          die "unknown source: $2" ;;
   esac
 }
 
-sv_file_url() { # <repo> <path> <source>
+ih_file_url() { # <repo> <path> <source>
   case "$3" in
     modelscope)
       python3 -c '
@@ -99,7 +99,7 @@ print(f"https://modelscope.cn/api/v1/models/{repo}/repo?Revision=master&FilePath
 
 # --- artifact state ----------------------------------------------------------
 
-sv_model_ready() { # <dir> — a complete artifact we can hand to the daemon
+ih_model_ready() { # <dir> — a complete artifact we can hand to the daemon
   local dir="$1"
   [ -f "$dir/config.json" ] || return 1
   [ -f "$dir/tokenizer.json" ] || return 1
@@ -107,13 +107,13 @@ sv_model_ready() { # <dir> — a complete artifact we can hand to the daemon
   return 0
 }
 
-sv_model_note() { # <dir>
+ih_model_note() { # <dir>
   printf '%s\n' "$(cat "$1/.manifest" 2>/dev/null | awk -F= '$1=="repo"{print $2}')"
 }
 
 # --- download ----------------------------------------------------------------
 
-sv_fetch_one() { # <url> <dest> <expected-size> <logfile>
+ih_fetch_one() { # <url> <dest> <expected-size> <logfile>
   local url="$1" dest="$2" size="$3" log="$4" tmp="${2}.part"
   mkdir -p "$(dirname "$dest")"
   if [ -f "$dest" ] && [ "$(stat -f%z "$dest" 2>/dev/null || echo 0)" = "$size" ]; then
@@ -131,23 +131,23 @@ sv_fetch_one() { # <url> <dest> <expected-size> <logfile>
   printf 'fetched %s\n' "$(basename "$dest")" >> "$log"
 }
 
-# sv_download_preset <preset> [source] [jobs]
-sv_download_preset() {
+# ih_download_preset <preset> [source] [jobs]
+ih_download_preset() {
   local preset="$1" source="${2:-auto}" jobs="${3:-3}"
   local repo dir
-  repo="$(sv_preset_repo "$preset")" || die "unknown preset: $preset"
-  dir="$(sv_preset_dir "$preset")"
-  sv_require_python
+  repo="$(ih_preset_repo "$preset")" || die "unknown preset: $preset"
+  dir="$(ih_preset_dir "$preset")"
+  ih_require_python
 
-  if sv_model_ready "$dir"; then
-    hint "already installed: $preset ($(sv_dir_size "$dir"))"
+  if ih_model_ready "$dir"; then
+    hint "already installed: $preset ($(ih_dir_size "$dir"))"
     return 0
   fi
 
   local listing=""
   if [ "$source" = "auto" ] || [ "$source" = "modelscope" ]; then
     step "listing ${repo} on ModelScope"
-    if listing="$(sv_list_modelscope "$repo" 2>/dev/null)" && [ -n "$listing" ]; then
+    if listing="$(ih_list_modelscope "$repo" 2>/dev/null)" && [ -n "$listing" ]; then
       source="modelscope"
     else
       [ "$source" = "modelscope" ] && die "ModelScope has no ${repo}"
@@ -157,14 +157,14 @@ sv_download_preset() {
   if [ -z "$listing" ]; then
     source="hf"
     step "listing ${repo} on ${HF_ENDPOINT:-https://huggingface.co}"
-    listing="$(sv_list_hf "$repo" "${HF_ENDPOINT:-https://huggingface.co}")"
+    listing="$(ih_list_hf "$repo" "${HF_ENDPOINT:-https://huggingface.co}")"
   fi
 
   local count total_bytes
   count="$(printf '%s\n' "$listing" | grep -c . || true)"
   total_bytes="$(printf '%s\n' "$listing" | awk -F'\t' '{s+=$1} END{print s+0}')"
   say "$(printf '%s' "$listing" | awk -F'\t' '{printf "  %12d  %s\n", $1, $2}' | head -20)"
-  say "  ${count} files, $(sv_human_bytes "$total_bytes") from ${source}"
+  say "  ${count} files, $(ih_human_bytes "$total_bytes") from ${source}"
   hint "  this can take a while; it is safe to interrupt and re-run — finished files are kept"
 
   mkdir -p "$dir"
@@ -174,15 +174,15 @@ sv_download_preset() {
   # seconds and stops with the fetches below.
   local hb="" hb_interval=10
   [ -t 2 ] || hb_interval=60
-  if [ "${SENSENOVA_PROGRESS:-1}" != "0" ]; then
-    sv_progress_loop "$dir" "$total_bytes" "$count" "$log" "$hb_interval" &
+  if [ "${IMAGEHIVE_PROGRESS:-1}" != "0" ]; then
+    ih_progress_loop "$dir" "$total_bytes" "$count" "$log" "$hb_interval" &
     hb=$!
   fi
 
   local failed=0 group=0 pids=()
   while IFS=$'\t' read -r size path; do
     [ -n "$path" ] || continue
-    sv_fetch_one "$(sv_file_url "$repo" "$path" "$source")" "$dir/$path" "$size" "$log" &
+    ih_fetch_one "$(ih_file_url "$repo" "$path" "$source")" "$dir/$path" "$size" "$log" &
     pids+=($!)
     group=$((group + 1))
     if [ "$group" -ge "$jobs" ]; then
@@ -214,13 +214,13 @@ sv_download_preset() {
 
   printf 'repo=%s\nsource=%s\nrevision=%s\n' "$repo" "$source" "master" > "$dir/.manifest"
   printf '%s\n' "$listing" | awk -F'\t' '{printf "size=%s\tpath=%s\n", $1, $2}' >> "$dir/.manifest"
-  say "installed ${preset} -> ${dir} ($(sv_dir_size "$dir"))"
+  say "installed ${preset} -> ${dir} ($(ih_dir_size "$dir"))"
 }
 
-# sv_progress_loop <dir> <total-bytes> <total-files> <log> <seconds>
+# ih_progress_loop <dir> <total-bytes> <total-files> <log> <seconds>
 # Prints one line per tick until it is killed. Never fails the installer: a
 # missing directory or an unreadable log just means this tick prints less.
-sv_progress_loop() {
+ih_progress_loop() {
   local dir="$1" total="$2" files="$3" log="$4" tick="$5"
   local start now done_bytes done_files elapsed
   start="$(date +%s)"
@@ -232,14 +232,14 @@ sv_progress_loop() {
     elapsed=$((now - start))
     [ "$elapsed" -gt 0 ] || elapsed=1
     printf '%s  %s/%s files, %s of %s (%s%%), %s elapsed\n' \
-      "$SV_DIM" "${done_files:-0}" "$files" \
-      "$(sv_human_bytes "${done_bytes:-0}")" "$(sv_human_bytes "$total")" \
-      "$(sv_percent "${done_bytes:-0}" "$total")" "$(sv_human_seconds "$elapsed")" >&2
+      "$IH_DIM" "${done_files:-0}" "$files" \
+      "$(ih_human_bytes "${done_bytes:-0}")" "$(ih_human_bytes "$total")" \
+      "$(ih_percent "${done_bytes:-0}" "$total")" "$(ih_human_seconds "$elapsed")" >&2
   done
 }
 
-# sv_human_bytes <bytes> — "33.0 GiB"
-sv_human_bytes() {
+# ih_human_bytes <bytes> — "33.0 GiB"
+ih_human_bytes() {
   local bytes="${1:-0}"
   awk -v b="$bytes" 'BEGIN {
     split("B KiB MiB GiB TiB", unit, " ")
@@ -249,25 +249,25 @@ sv_human_bytes() {
   }'
 }
 
-# sv_percent <done-bytes> <total-bytes> — integer, 0 when the total is unknown
-sv_percent() {
+# ih_percent <done-bytes> <total-bytes> — integer, 0 when the total is unknown
+ih_percent() {
   local done="${1:-0}" total="${2:-0}"
   [ "${total:-0}" -gt 0 ] 2>/dev/null || { printf '?\n'; return 0; }
   printf '%s\n' "$((done * 100 / total))"
 }
 
-# sv_human_seconds <seconds> — "4m30s"
-sv_human_seconds() {
+# ih_human_seconds <seconds> — "4m30s"
+ih_human_seconds() {
   local s="${1:-0}"
   if [ "$s" -ge 3600 ]; then printf '%dh%02dm\n' "$((s / 3600))" "$(((s % 3600) / 60))"
   elif [ "$s" -ge 60 ]; then printf '%dm%02ds\n' "$((s / 60))" "$((s % 60))"
   else printf '%ds\n' "$s"; fi
 }
 
-# sv_verify_preset <preset> — sizes on disk vs what the manifest recorded
-sv_verify_preset() {
-  local dir; dir="$(sv_preset_dir "$1")"
-  sv_model_ready "$dir" || { warn "not installed: $1"; return 1; }
+# ih_verify_preset <preset> — sizes on disk vs what the manifest recorded
+ih_verify_preset() {
+  local dir; dir="$(ih_preset_dir "$1")"
+  ih_model_ready "$dir" || { warn "not installed: $1"; return 1; }
   local bad=0
   while IFS=$'\t' read -r spec path; do
     local want="${spec#size=}" got

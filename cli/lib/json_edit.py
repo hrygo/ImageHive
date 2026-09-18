@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal, order-preserving JSON edits used by `sensenova-u1 clients`.
+"""Minimal, order-preserving JSON edits used by `imagehive clients`.
 
 Usage:
   json_edit.py set   <file> <dotted.path> <command> [ENV=value ...]
@@ -21,7 +21,7 @@ def client_entry(flavor, command, env):
     """The entry shape each client expects. Keep them here, not in shell."""
     if flavor == "qwenpaw":
         return {
-            "name": "sensenova_u1",
+            "name": "imagehive",
             "description": "Local SenseNova-U1.5 images: generate, edit, describe (one shared resident model)",
             "enabled": True,
             "transport": "stdio",

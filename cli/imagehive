@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# sensenova-u1 — manage the local SenseNova-U1.5 image service.
+# imagehive — manage the resident local image service.
 #
-#   sensenova-u1 status            what the daemon is doing right now
-#   sensenova-u1 doctor            check every moving part, exit 1 if broken
-#   sensenova-u1 models            which artifacts are installed
-#   sensenova-u1 models pull NAME  download an artifact (ModelScope first)
-#   sensenova-u1 clients           which MCP clients are wired
-#   sensenova-u1 clients add X     wire a client (or `auto` for all detected)
-#   sensenova-u1 options           what can be asked for, and what is installed
-#   sensenova-u1 start|stop|restart|logs|unload|config|paths
-#   sensenova-u1 generate --help   draw an image (seed, size, metadata, --json)
+#   imagehive status            what the daemon is doing right now
+#   imagehive doctor            check every moving part, exit 1 if broken
+#   imagehive models            which artifacts are installed
+#   imagehive models pull NAME  download an artifact (ModelScope first)
+#   imagehive clients           which MCP clients are wired
+#   imagehive clients add X     wire a client (or `auto` for all detected)
+#   imagehive options           what can be asked for, and what is installed
+#   imagehive start|stop|restart|logs|unload|config|paths
+#   imagehive generate --help   draw an image (seed, size, metadata, --json)
 
 set -euo pipefail
 
-# The installed command is a symlink into ~/.local/share/sensenova-u1, so resolve
+# The installed command is a symlink into ~/.local/share/imagehive, so resolve
 # the real location before looking for cli/lib next to it.
-sv_self_dir() {
+ih_self_dir() {
   local src="${BASH_SOURCE[0]}" target
   while [ -L "$src" ]; do
     target="$(readlink "$src")"
@@ -26,46 +26,46 @@ sv_self_dir() {
   done
   printf '%s\n' "$(cd "$(dirname "$src")" && pwd)"
 }
-SV_LIB_DIR="$(sv_self_dir)/lib"
+IH_LIB_DIR="$(ih_self_dir)/lib"
 # shellcheck source=lib/common.sh
-. "$SV_LIB_DIR/common.sh"
+. "$IH_LIB_DIR/common.sh"
 # shellcheck source=lib/models.sh
-. "$SV_LIB_DIR/models.sh"
+. "$IH_LIB_DIR/models.sh"
 # shellcheck source=lib/clients.sh
-. "$SV_LIB_DIR/clients.sh"
+. "$IH_LIB_DIR/clients.sh"
 
-sv_load_conf
+ih_load_conf
 
 usage() {
   sed -n '3,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 help_status() {
-  say "sensenova-u1 status — what the daemon is doing right now"
+  say "imagehive status — what the daemon is doing right now"
   say "  Answers immediately, including while a generation is running: resident_tier,"
   say "  available_tiers, loads_total, inflight, queue_depth and, when something is"
   say "  running, current = {tool, step, total, percent, elapsed_seconds}."
-  say "  See also: sensenova-u1 options (what can be asked for), doctor (health)."
+  say "  See also: imagehive options (what can be asked for), doctor (health)."
 }
 
 help_doctor() {
-  say "sensenova-u1 doctor — check every moving part; exit 1 if something is broken"
+  say "imagehive doctor — check every moving part; exit 1 if something is broken"
   say "  A missing artifact is a hint, not a failure: one tier is a supported setup,"
   say "  and the installed artifact serves requests for the other one."
 }
 
 help_models() {
-  say "${SV_BOLD}sensenova-u1 models${SV_RESET} — which artifacts are installed"
+  say "${IH_BOLD}imagehive models${IH_RESET} — which artifacts are installed"
   say ""
   say "  models                    list presets, installed artifacts and tier mapping"
   say "  models pull <preset>      download one (ModelScope first, then Hugging Face)"
   say ""
-  say "  Presets: $(sv_preset_names | tr '\n' ' ')"
-  say "  After changing artifacts: sensenova-u1 restart (config.json is read at start)."
+  say "  Presets: $(ih_preset_names | tr '\n' ' ')"
+  say "  After changing artifacts: imagehive restart (config.json is read at start)."
 }
 
 help_clients() {
-  say "${SV_BOLD}sensenova-u1 clients${SV_RESET} — which MCP clients are wired to this service"
+  say "${IH_BOLD}imagehive clients${IH_RESET} — which MCP clients are wired to this service"
   say ""
   say "  clients                   list every known client and whether it is wired"
   say "  clients add <name>        wire one (Codex, Claude, opencode, QwenPaw, ...)"
@@ -77,30 +77,30 @@ help_clients() {
 }
 
 help_config() {
-  say "${SV_BOLD}sensenova-u1 config${SV_RESET} — the service layout and its knobs"
+  say "${IH_BOLD}imagehive config${IH_RESET} — the service layout and its knobs"
   say ""
   say "  config                    show every path and whether each tier is installed"
-  say "  config set KEY=VALUE ...  change one (SENSENOVA_MODELS, SENSENOVA_OUT, ...)"
+  say "  config set KEY=VALUE ...  change one (IMAGEHIVE_MODELS, IMAGEHIVE_OUT, ...)"
   say ""
-  say "  Daemon knobs live in $(sv_config): ttl_seconds, min_warm_seconds,"
+  say "  Daemon knobs live in $(ih_config): ttl_seconds, min_warm_seconds,"
   say "  fast_artifact, quality_artifact, write_sidecar. Restart after changing either."
 }
 
 help_logs() {
-  say "sensenova-u1 logs [-f] — the daemon log at $(sv_log)"
+  say "imagehive logs [-f] — the daemon log at $(ih_log)"
   say "  Startup, weight loads, tier fallbacks and errors land here; prompts, seeds and"
   say "  settings land in each image's sidecar (<image>.png.json) instead."
 }
 
 help_unload() {
-  say "sensenova-u1 unload — release the resident weights now (about 34 GB back)"
+  say "imagehive unload — release the resident weights now (about 34 GB back)"
   say "  Reports busy instead of waiting when a generation is running."
 }
 
 cmd_status() {
-  local label; label="$(sv_label)"
+  local label; label="$(ih_label)"
   say "service:  $label"
-  if sv_service_loaded; then
+  if ih_service_loaded; then
     # "not running" is normal: one daemon serves every client, and whichever
     # front end needed it first owns it. Only the socket matters.
     local state; state="$(launchctl print "gui/$(id -u)/$label" 2>/dev/null | awk -F'= ' '/^\tstate = /{print $2; exit}')"
@@ -112,60 +112,68 @@ cmd_status() {
   else
     say "launchd:  not loaded (the MCP front end starts the daemon on demand)"
   fi
-  say "home:     $(sv_home)"
-  say "models:   $(sv_models)"
-  say "output:   $(sv_out_dir)"
-  say "socket:   $(sv_socket)"
-  say "log:      $(sv_log)"
-  if ! [ -x "$(sv_mcp)" ]; then
+  say "home:     $(ih_home)"
+  say "models:   $(ih_models)"
+  say "output:   $(ih_out_dir)"
+  say "socket:   $(ih_socket)"
+  say "log:      $(ih_log)"
+  if ! [ -x "$(ih_mcp)" ]; then
     say "state:    not installed — run install.sh"
     return 1
   fi
   say ""
-  sv_status | sed 's/^/  /'
+  ih_status | sed 's/^/  /'
 }
 
 cmd_doctor() {
   local problems=0
   check() { # <ok|warn|fail> <label> <detail>
     case "$1" in
-      ok)   printf '  %s✓%s %s\n' "$SV_GREEN" "$SV_RESET" "$2" ;;
-      warn) printf '  %s!%s %s\n' "$SV_YELLOW" "$SV_RESET" "$2"; [ -n "${3:-}" ] && hint "     $3" ;;
-      fail) printf '  %s✗%s %s\n' "$SV_RED" "$SV_RESET" "$2"; [ -n "${3:-}" ] && hint "     $3"; problems=$((problems + 1)) ;;
+      ok)   printf '  %s✓%s %s\n' "$IH_GREEN" "$IH_RESET" "$2" ;;
+      warn) printf '  %s!%s %s\n' "$IH_YELLOW" "$IH_RESET" "$2"; [ -n "${3:-}" ] && hint "     $3" ;;
+      fail) printf '  %s✗%s %s\n' "$IH_RED" "$IH_RESET" "$2"; [ -n "${3:-}" ] && hint "     $3"; problems=$((problems + 1)) ;;
     esac
   }
 
   say "host"
-  [ "$(sv_host_arch)" = "arm64" ] \
-    && check ok "Apple silicon ($(sv_host_arch))" \
-    || check fail "Apple silicon required (found $(sv_host_arch))" "MLX only runs on M1 or newer"
-  local macos; macos="$(sv_macos)"
+  [ "$(ih_host_arch)" = "arm64" ] \
+    && check ok "Apple silicon ($(ih_host_arch))" \
+    || check fail "Apple silicon required (found $(ih_host_arch))" "MLX only runs on M1 or newer"
+  local macos; macos="$(ih_macos)"
   case "$macos" in
     2[6-9].*|[3-9][0-9].*) check ok "macOS $macos" ;;
     *) check fail "macOS $macos is too old" "the package targets macOS 26+" ;;
   esac
-  local ram; ram="$(sv_host_ram_gb)"
+  local ram; ram="$(ih_host_ram_gb)"
   if [ "$ram" -ge 32 ]; then check ok "unified memory ${ram}GB"
   elif [ "$ram" -ge 18 ]; then check warn "unified memory ${ram}GB" "the 4-bit tier peaks at ~15GB; close other apps and expect swaps"
   else check fail "unified memory ${ram}GB is too small" "the smallest artifact peaks at ~15GB"; fi
 
   say "install"
-  [ -f "$(sv_conf)" ] && check ok "service.conf" || check warn "service.conf missing" "re-run install.sh"
-  if [ ! -f "$(sv_config)" ]; then
+  [ -f "$(ih_conf)" ] && check ok "service.conf" || check warn "service.conf missing" "re-run install.sh"
+  if [ ! -f "$(ih_config)" ]; then
     check warn "config.json missing" "re-run install.sh"
-  elif sv_config_parses; then
+  elif ih_config_parses; then
     check ok "config.json"
   else
     # Present but unusable is worse than missing: the daemon starts anyway and serves
     # the built-in defaults, so nothing else in this report would look wrong.
     check warn "config.json is not valid JSON" \
-      "every setting in $(sv_config) is ignored (the daemon serves the built-in defaults) — fix it or delete it"
+      "every setting in $(ih_config) is ignored (the daemon serves the built-in defaults) — fix it or delete it"
   fi
-  [ -d "$(sv_out_dir)" ] && check ok "output directory" || check warn "output directory not created yet" "$(sv_out_dir) appears on the first generation"
-  [ -x "$(sv_served)" ] && check ok "sensenova-served" || check fail "sensenova-served missing" "run install.sh"
-  [ -x "$(sv_mcp)" ] && check ok "sensenova-mcp" || check fail "sensenova-mcp missing" "run install.sh"
+  [ -d "$(ih_out_dir)" ] && check ok "output directory" || check warn "output directory not created yet" "$(ih_out_dir) appears on the first generation"
+  [ -x "$(ih_daemon)" ] && check ok "imagehived" || check fail "imagehived missing" "run install.sh"
+  [ -x "$(ih_mcp)" ] && check ok "imagehive-mcp" || check fail "imagehive-mcp missing" "run install.sh"
   local bundle count
-  count="$(ls -d "$(sv_bin_dir)"/*.bundle 2>/dev/null | wc -l | tr -d ' ')"
+  # Counted in the shell, not with `ls … | wc -l`: with `set -o pipefail` a glob
+  # that matches nothing makes that pipeline fail, the assignment carries the
+  # failure, and `set -e` ends the report right here — which is how a machine
+  # without the MLX bundles got a doctor that stopped after the third section and
+  # said nothing about tiers, clients or the pre-0.6 leftovers below.
+  count=0
+  for bundle in "$(ih_bin_dir)"/*.bundle; do
+    if [ -e "$bundle" ]; then count=$((count + 1)); fi
+  done
   [ "$count" -ge 1 ] \
     && check ok "MLX resource bundles ($count)" \
     || check fail "MLX resource bundles missing" "the daemon dies on the first generation — re-run install.sh"
@@ -173,45 +181,45 @@ cmd_doctor() {
   say "tiers in use"
   local tier dir installed="" absent=""
   for tier in fast quality; do
-    dir="$(sv_artifact_dir "$tier")"
-    if sv_tier_ready "$tier"; then
+    dir="$(ih_artifact_dir "$tier")"
+    if ih_tier_ready "$tier"; then
       installed="${installed:+$installed }$tier"
-      check ok "$tier -> $(basename "$dir") ($(sv_dir_size "$dir"))"
+      check ok "$tier -> $(basename "$dir") ($(ih_dir_size "$dir"))"
     else
       absent="${absent:+$absent }$tier"
       # Not an error: the daemon serves requests for a missing tier from the
       # installed one, so a tier that is not installed is only a choice.
       check warn "$tier tier artifact not installed ($dir)" \
-        "optional — add it with sensenova-u1 models pull $([ "$tier" = fast ] && echo fast-4bit || echo quality-bf16)"
+        "optional — add it with imagehive models pull $([ "$tier" = fast ] && echo fast-4bit || echo quality-bf16)"
     fi
   done
   case "$installed" in
     "") check fail "no model artifact installed" \
-          "sensenova-u1 models pull fast-4bit (11 GiB) or quality-bf16 (33 GiB)" ;;
+          "imagehive models pull fast-4bit (11 GiB) or quality-bf16 (33 GiB)" ;;
     fast|quality) hint "     one artifact installed: requests for the $absent tier are served by $installed" ;;
   esac
   say "downloaded presets"
   local preset any=0
-  for preset in $(sv_preset_names); do
-    dir="$(sv_preset_dir "$preset")"
+  for preset in $(ih_preset_names); do
+    dir="$(ih_preset_dir "$preset")"
     [ -d "$dir" ] || continue
     any=1
-    if sv_model_ready "$dir"; then check ok "$preset ($(sv_dir_size "$dir"))"
-    else check warn "$preset is incomplete" "sensenova-u1 models pull $preset (resumes)"; fi
+    if ih_model_ready "$dir"; then check ok "$preset ($(ih_dir_size "$dir"))"
+    else check warn "$preset is incomplete" "imagehive models pull $preset (resumes)"; fi
   done
   [ "$any" = "1" ] || hint "     none yet; artifacts you built yourself are fine too"
 
   say "service"
-  if sv_service_loaded; then
+  if ih_service_loaded; then
     check ok "launchd job loaded"
   else
     check warn "launchd job not loaded" "install.sh loads it; the front end also starts it on demand"
   fi
-  # One round trip, parsed here: three separate `sv_status` calls used to spawn the
+  # One round trip, parsed here: three separate `ih_status` calls used to spawn the
   # front end three times, and could disagree with each other.
   local status_out="" field
-  if [ -x "$(sv_mcp)" ]; then
-    status_out="$(sv_status 2>/dev/null || true)"
+  if [ -x "$(ih_mcp)" ]; then
+    status_out="$(ih_status 2>/dev/null || true)"
   fi
   if [ -n "$status_out" ]; then
     field() { printf '%s\n' "$status_out" | awk -F= -v key="$1" '$1==key{print $2}'; }
@@ -219,31 +227,60 @@ cmd_doctor() {
     # A daemon started before this install keeps the socket and answers with the
     # previous build's behaviour — "I reinstalled and nothing changed" is this.
     local serving; serving="$(field project_version)"
-    if [ "$serving" = "$SV_VERSION" ]; then
+    if [ "$serving" = "$IH_VERSION" ]; then
       check ok "daemon is $serving (pid $(field pid))"
     elif [ -z "$serving" ]; then
       check warn "the daemon answering does not report a version (predates 0.5.1)" \
-        "an older process still owns the socket — run: sensenova-u1 restart"
+        "an older process still owns the socket — run: imagehive restart"
     else
-      check warn "the daemon answering reports version $serving, this install is $SV_VERSION" \
-        "an older process still owns the socket — run: sensenova-u1 restart"
+      check warn "the daemon answering reports version $serving, this install is $IH_VERSION" \
+        "an older process still owns the socket — run: imagehive restart"
     fi
-  elif [ -x "$(sv_mcp)" ]; then
-    check fail "daemon not answering" "check $(sv_log)"
+  elif [ -x "$(ih_mcp)" ]; then
+    check fail "daemon not answering" "check $(ih_log)"
   fi
 
   say "clients"
   local wired=0 client
-  for client in $(sv_clients_detected); do
-    if sv_client_has "$client"; then check ok "$client wired"; wired=$((wired + 1))
-    else check warn "$client detected but not wired" "sensenova-u1 clients add $client"; fi
+  for client in $(ih_clients_detected); do
+    if ih_client_has "$client"; then check ok "$client wired"; wired=$((wired + 1))
+    else check warn "$client detected but not wired" "imagehive clients add $client"; fi
+    # A client can be wired under both names — the pre-0.6 entry keeps starting
+    # the service through the compatibility wrapper — and then every tool shows
+    # up twice in its list. Worth naming here, where the agent cannot see it.
+    if ih_client_has_legacy "$client"; then
+      check warn "$client still has the pre-0.6 entry" \
+        "imagehive clients remove $client, then wire it again (that entry points at the old paths)"
+    fi
   done
-  [ "$wired" -gt 0 ] || check warn "no client wired yet" "sensenova-u1 clients add auto"
+  [ "$wired" -gt 0 ] || check warn "no client wired yet" "imagehive clients add auto"
 
-  local legacy="${SENSENOVA_LEGACY_HOME:-$HOME/Models/SenseNova-U1.5}"
+  local legacy="${IMAGEHIVE_LEGACY_HOME:-$HOME/Models/SenseNova-U1.5}"
   if [ -d "$legacy/bin" ]; then
     check warn "old layout still on disk" "$legacy keeps compatibility wrappers; restart the MCP clients and delete it (Docs/LAYOUT.md)"
   fi
+  # The pre-0.6 names. Both halves are reported because both are live hazards: a
+  # home left behind is 33 GB nobody is using, and a daemon under the old name is
+  # a second copy of the weights, on a second socket.
+  if [ -d "$IH_LEGACY_HOME" ]; then
+    check warn "pre-0.6 app home still on disk" "$IH_LEGACY_HOME — install.sh moves it into place on its next run"
+  fi
+  # Anywhere on the machine, not just this layout's: a pre-0.6 daemon started from
+  # another --home/--prefix is still a second copy of the weights.
+  local stale; stale="$(ih_legacy_daemon_pids_anywhere | tr '\n' ' ')"
+  if [ -n "${stale// /}" ]; then
+    check warn "pre-0.6 daemon still running" "pid $stale — imagehive restart reaps it"
+  fi
+  # A pre-0.6 job respawns the old binary at every login, so it is a leftover with
+  # a schedule attached. Matched on the file's content: the label is user-settable
+  # and the default name would miss `--label` installs.
+  local plist
+  for plist in "$HOME/Library/LaunchAgents"/*.plist; do
+    [ -f "$plist" ] || continue
+    if grep -qE "$IH_LEGACY_DAEMON|$IH_LEGACY_SHARE" "$plist" 2>/dev/null; then
+      check warn "pre-0.6 launchd job still installed" "$(basename "$plist") — install.sh removes it (or: launchctl bootout gui/\$(id -u)/$(basename "$plist" .plist))"
+    fi
+  done
 
   say ""
   if [ "$problems" -eq 0 ]; then
@@ -260,50 +297,50 @@ cmd_models() {
     list|"")
       printf '%-14s %-11s %-12s %s\n' PRESET TIER INSTALLED NOTE
       local preset dir size tier note
-      for preset in $(sv_preset_names); do
-        dir="$(sv_preset_dir "$preset")"
-        tier="$(sv_preset_tier "$preset")"
-        note="$(sv_preset_field "$preset" 5)"
-        if sv_model_ready "$dir"; then size="$(sv_dir_size "$dir")"; else size="-"; fi
+      for preset in $(ih_preset_names); do
+        dir="$(ih_preset_dir "$preset")"
+        tier="$(ih_preset_tier "$preset")"
+        note="$(ih_preset_field "$preset" 5)"
+        if ih_model_ready "$dir"; then size="$(ih_dir_size "$dir")"; else size="-"; fi
         printf '%-14s %-11s %-12s %s\n' "$preset" "$tier" "$size" "$note"
       done
       say ""
       local tier dir
       for tier in fast quality; do
-        dir="$(sv_artifact_dir "$tier")"
-        if sv_tier_ready "$tier"; then
-          say "$tier tier    -> $dir ($(sv_dir_size "$dir"))"
+        dir="$(ih_artifact_dir "$tier")"
+        if ih_tier_ready "$tier"; then
+          say "$tier tier    -> $dir ($(ih_dir_size "$dir"))"
         else
           say "$tier tier    -> $dir (not installed)"
         fi
       done
       say ""
-      local have; have="$(sv_installed_tiers)"
+      local have; have="$(ih_installed_tiers)"
       case "$have" in
-        "")      hint "no artifact installed yet — sensenova-u1 models pull fast-4bit" ;;
+        "")      hint "no artifact installed yet — imagehive models pull fast-4bit" ;;
         fast)    hint "one artifact: requests for the quality tier are served by the fast artifact" ;;
         quality) hint "one artifact: requests for the fast tier are served by the quality artifact" ;;
       esac
       ;;
     pull)
       local what="${1:-}" source="${2:-auto}"
-      [ -n "$what" ] || die "usage: sensenova-u1 models pull <preset|all> [modelscope|hf]"
+      [ -n "$what" ] || die "usage: imagehive models pull <preset|all> [modelscope|hf]"
       if [ "$what" = "all" ]; then
         local preset
-        for preset in $(sv_preset_names); do sv_download_preset "$preset" "$source"; done
+        for preset in $(ih_preset_names); do ih_download_preset "$preset" "$source"; done
       else
-        sv_download_preset "$what" "$source"
+        ih_download_preset "$what" "$source"
       fi
       ;;
     verify)
       local preset rc=0
-      for preset in $(sv_preset_names); do
-        sv_model_ready "$(sv_preset_dir "$preset")" || continue
-        if sv_verify_preset "$preset"; then say "ok: $preset"; else warn "damaged: $preset"; rc=1; fi
+      for preset in $(ih_preset_names); do
+        ih_model_ready "$(ih_preset_dir "$preset")" || continue
+        if ih_verify_preset "$preset"; then say "ok: $preset"; else warn "damaged: $preset"; rc=1; fi
       done
       return "$rc"
       ;;
-    *) die "usage: sensenova-u1 models [list|pull|verify]" ;;
+    *) die "usage: imagehive models [list|pull|verify]" ;;
   esac
 }
 
@@ -312,42 +349,42 @@ cmd_clients() {
   case "$action" in
     list|"")
       local name
-      for name in $(sv_client_list); do
+      for name in $(ih_client_list); do
         local mark=" "
-        sv_client_detect "$name" && mark="•" || mark=" "
-        if sv_client_has "$name" 2>/dev/null; then
+        ih_client_detect "$name" && mark="•" || mark=" "
+        if ih_client_has "$name" 2>/dev/null; then
           printf '%s %-15s wired\n' "$mark" "$name"
-        elif sv_client_detect "$name"; then
+        elif ih_client_detect "$name"; then
           printf '%s %-15s detected, not wired\n' "$mark" "$name"
         else
           printf '%s %-15s not installed\n' "$mark" "$name"
         fi
       done
       say ""
-      hint "• = client detected on this machine; wire one with: sensenova-u1 clients add <name>"
+      hint "• = client detected on this machine; wire one with: imagehive clients add <name>"
       ;;
     add)
       local what="${1:-auto}"
       if [ "$what" = "auto" ]; then
         local any=0 failed=0 name
-        for name in $(sv_clients_detected); do
+        for name in $(ih_clients_detected); do
           any=1
-          sv_client_try "$name" || { warn "could not wire $name"; failed=$((failed + 1)); }
+          ih_client_try "$name" || { warn "could not wire $name"; failed=$((failed + 1)); }
         done
-        if [ "$any" = "0" ]; then warn "no known client detected"; sv_print_snippet; fi
+        if [ "$any" = "0" ]; then warn "no known client detected"; ih_print_snippet; fi
         [ "$failed" = "0" ] || return 1
       elif [ "$what" = "generic" ]; then
-        sv_print_snippet
+        ih_print_snippet
       else
-        sv_client_add "$what"
+        ih_client_add "$what"
       fi
       ;;
     remove)
-      local what="${1:-}"; [ -n "$what" ] || die "usage: sensenova-u1 clients remove <name>"
-      sv_client_remove "$what"
+      local what="${1:-}"; [ -n "$what" ] || die "usage: imagehive clients remove <name>"
+      ih_client_remove "$what"
       ;;
-    snippet) sv_print_snippet ;;
-    *) die "usage: sensenova-u1 clients [list|add|remove|snippet]" ;;
+    snippet) ih_print_snippet ;;
+    *) die "usage: imagehive clients [list|add|remove|snippet]" ;;
   esac
 }
 
@@ -355,37 +392,37 @@ cmd_config() {
   local action="${1:-show}"
   case "$action" in
     show)
-      say "file: $(sv_conf)"
-      say "SENSENOVA_HOME=$(sv_home)"
-      say "SENSENOVA_PREFIX=$(sv_prefix)"
-      say "SENSENOVA_LABEL=$(sv_label)"
-      say "SENSENOVA_SOCKET=$(sv_socket)"
-      say "SENSENOVA_MODELS=$(sv_models)"
-      say "SENSENOVA_OUT=$(sv_out_dir)"
+      say "file: $(ih_conf)"
+      say "IMAGEHIVE_HOME=$(ih_home)"
+      say "IMAGEHIVE_PREFIX=$(ih_prefix)"
+      say "IMAGEHIVE_LABEL=$(ih_label)"
+      say "IMAGEHIVE_SOCKET=$(ih_socket)"
+      say "IMAGEHIVE_MODELS=$(ih_models)"
+      say "IMAGEHIVE_OUT=$(ih_out_dir)"
       local tier state
       for tier in fast quality; do
         state="not installed"
-        if sv_tier_ready "$tier"; then state="installed"; fi
+        if ih_tier_ready "$tier"; then state="installed"; fi
         if [ "$tier" = fast ]; then
-          say "SENSENOVA_FAST_ARTIFACT=$(sv_fast_artifact) [$state]"
+          say "IMAGEHIVE_FAST_ARTIFACT=$(ih_fast_artifact) [$state]"
         else
-          say "SENSENOVA_QUALITY_ARTIFACT=$(sv_quality_artifact) [$state]"
+          say "IMAGEHIVE_QUALITY_ARTIFACT=$(ih_quality_artifact) [$state]"
         fi
       done
-      say "daemon config: $(sv_config)"
+      say "daemon config: $(ih_config)"
       ;;
     set)
       shift || true
-      [ "$#" -gt 0 ] || die "usage: sensenova-u1 config set KEY=VALUE [...]"
-      sv_write_conf "$@"
-      say "updated $(sv_conf) — restart the service for changes to take effect"
+      [ "$#" -gt 0 ] || die "usage: imagehive config set KEY=VALUE [...]"
+      ih_write_conf "$@"
+      say "updated $(ih_conf) — restart the service for changes to take effect"
       ;;
-    *) die "usage: sensenova-u1 config [show|set]" ;;
+    *) die "usage: imagehive config [show|set]" ;;
   esac
 }
 
 help_generate() {
-  say "${SV_BOLD}sensenova-u1 generate${SV_RESET} — one image per request"
+  say "${IH_BOLD}imagehive generate${IH_RESET} — one image per request"
   say ""
   say "  --prompt TEXT        what to draw (required); quote text that must appear"
   say "  --negative TEXT      what to avoid. This is the unconditional branch of"
@@ -397,7 +434,7 @@ help_generate() {
   say "                       1600x896 (16:9), 896x1600 (9:16)."
   say "  --tier fast|quality  a preference, not a requirement: a tier that is not"
   say "                       installed here is served by the installed one, at that"
-  say "                       artifact's own recipe (default: $(sv_default_tier))"
+  say "                       artifact's own recipe (default: $(ih_default_tier))"
   say "  --steps N            override the recipe (fast 8, quality 50)"
   say "  --cfg F              override guidance scale (fast 1.0, quality 4.0)"
   say "  --seed N             fix the seed. Same seed + same artifact + same settings"
@@ -410,7 +447,7 @@ help_generate() {
   say "  Every image is written with a sidecar <image>.png.json holding the prompt and"
   say "  its sha256, the seed and whether it was pinned, size, steps, cfg, tier,"
   say "  artifact and timing — that is what makes two runs comparable afterwards."
-  say "  Output directory: $(sv_out_dir)"
+  say "  Output directory: $(ih_out_dir)"
   say ""
   say "  A request that is already running cannot be cancelled: killing this command"
   say "  leaves the generation going and its PNG still lands (see the same note in"
@@ -421,7 +458,7 @@ help_generate() {
 # The rules the daemon enforces, checked here first so a typo does not cost a round
 # trip. The daemon stays the authority: it re-checks, because the socket is open to
 # more than this CLI.
-sv_check_size() { # <value> <axis>
+ih_check_size() { # <value> <axis>
   case "${1:-}" in
     ''|*[!0-9]*) die "$2 must be a positive integer (got '${1:-}')" ;;
   esac
@@ -435,7 +472,7 @@ sv_check_size() { # <value> <axis>
 }
 
 # <old> <new> — the caller's --out move, so the printed/JSON paths are the final ones.
-sv_generate_move() { # <source> <out> <single_file: 0|1>
+ih_generate_move() { # <source> <out> <single_file: 0|1>
   local src="$1" out="$2" single="$3" dest
   [ -n "$out" ] || return 0
   if [ "$single" = "1" ]; then
@@ -470,30 +507,30 @@ cmd_generate() {
       --negative) negative="${2:-}"; shift 2 ;;
       --out)    out="${2:-}"; shift 2 ;;
       --json)   json=1; shift ;;
-      *) die "unknown option: $1 (see: sensenova-u1 generate --help)" ;;
+      *) die "unknown option: $1 (see: imagehive generate --help)" ;;
     esac
   done
-  [ -n "$prompt" ] || die 'usage: sensenova-u1 generate --prompt "..." [options] — see: sensenova-u1 generate --help'
+  [ -n "$prompt" ] || die 'usage: imagehive generate --prompt "..." [options] — see: imagehive generate --help'
   case "$count" in ''|*[!0-9]*) die "--n expects a positive integer (got '$count')" ;; esac
   [ "$count" -ge 1 ] || die "--n expects at least 1"
   case "$seed" in ''|*[!0-9]*) [ -z "$seed" ] || die "--seed expects an unsigned integer (got '$seed')" ;; esac
   [ -z "$steps" ] || case "$steps" in *[!0-9]*) die "--steps expects an integer (got '$steps')" ;; esac
   [ -z "$steps" ] || { [ "$steps" -ge 1 ] && [ "$steps" -le 500 ]; } \
     || die "--steps must be between 1 and 500"
-  sv_check_size "$width" width
-  sv_check_size "$height" height
+  ih_check_size "$width" width
+  ih_check_size "$height" height
   # Whatever is installed decides the default; the daemon would fall back to it
   # anyway, but naming it here keeps the script readable.
-  [ -n "$tier" ] || tier="$(sv_default_tier)"
+  [ -n "$tier" ] || tier="$(ih_default_tier)"
   # A file target only makes sense for a single image; anything else is a directory.
   local single_file=0
   case "$out" in *.png|*.PNG) single_file=1 ;; esac
   [ "$single_file" = "0" ] || [ "$count" = "1" ] || die "--out <file>.png writes one image; use a directory with --n $count"
-  sv_need_python
-  mkdir -p "$(sv_out_dir)"
+  ih_need_python
+  mkdir -p "$(ih_out_dir)"
 
   local i=0 old new items
-  items="$(mktemp "${TMPDIR:-/tmp}/sensenova-u1-items.XXXXXX")"
+  items="$(mktemp "${TMPDIR:-/tmp}/imagehive-items.XXXXXX")"
   while [ "$i" -lt "$count" ]; do
     args="$(python3 -c '
 import json, sys
@@ -510,32 +547,32 @@ print(json.dumps(args))
     # The request runs to completion inside the daemon (there is no cancel), so the
     # only live signal is the daemon's own progress; poll it when a human is watching.
     local answer_file poller=""
-    answer_file="$(mktemp "${TMPDIR:-/tmp}/sensenova-u1-generate.XXXXXX")"
+    answer_file="$(mktemp "${TMPDIR:-/tmp}/imagehive-generate.XXXXXX")"
     if [ "$json" = "0" ] && [ -t 2 ]; then
-      python3 "$SV_LIB_DIR/progress.py" "$(sv_socket)" >&2 2>/dev/null &
+      python3 "$IH_LIB_DIR/progress.py" "$(ih_socket)" >&2 2>/dev/null &
       poller=$!
     fi
     if [ "$json" = "0" ]; then
       printf 'drawing %sx%s on the %s tier%s ...\n' "$width" "$height" "$tier" \
         "$([ -n "$seed" ] && echo " (seed $(( seed + i )))" || echo "")" >&2
     fi
-    printf '%s\n' "$line" | "$(sv_mcp)" 2>/dev/null > "$answer_file" || true
+    printf '%s\n' "$line" | "$(ih_mcp)" 2>/dev/null > "$answer_file" || true
     if [ -n "$poller" ]; then
       kill "$poller" 2>/dev/null || true
       wait "$poller" 2>/dev/null || true
       printf '\n' >&2
     fi
 
-    old="$(python3 "$SV_LIB_DIR/generate_result.py" path "$answer_file")" || {
+    old="$(python3 "$IH_LIB_DIR/generate_result.py" path "$answer_file")" || {
       rm -f "$answer_file" "$items"
       exit 1
     }
     new="$old"
-    [ -z "$out" ] || new="$(sv_generate_move "$old" "$out" "$single_file")"
+    [ -z "$out" ] || new="$(ih_generate_move "$old" "$out" "$single_file")"
     if [ "$json" = "1" ]; then
-      python3 "$SV_LIB_DIR/generate_result.py" json "$answer_file" "$new" >> "$items"
+      python3 "$IH_LIB_DIR/generate_result.py" json "$answer_file" "$new" >> "$items"
     else
-      python3 "$SV_LIB_DIR/generate_result.py" text "$answer_file" "$new"
+      python3 "$IH_LIB_DIR/generate_result.py" text "$answer_file" "$new"
     fi
     rm -f "$answer_file"
     i=$(( i + 1 ))
@@ -556,7 +593,7 @@ print(json.dumps([json.loads(l) for l in open(sys.argv[1]) if l.strip()],
 }
 
 help_options() {
-  say "sensenova-u1 options — what this service accepts, and what is installed here"
+  say "imagehive options — what this service accepts, and what is installed here"
   say ""
   say "  Answers without loading the weights, and answers while another generation is"
   say "  running. Prints the size/step/cfg/seed rules, whether a negative prompt is"
@@ -567,9 +604,9 @@ cmd_options() {
   case "${1:-}" in
     -h|--help) help_options; return 0 ;;
   esac
-  sv_need_python
+  ih_need_python
   printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"model_options","arguments":{}}}' \
-    | "$(sv_mcp)" 2>/dev/null \
+    | "$(ih_mcp)" 2>/dev/null \
     | python3 -c '
 import json, sys
 for line in sys.stdin:
@@ -585,15 +622,15 @@ for line in sys.stdin:
 
 cmd_logs() {
   if [ "${1:-}" = "-f" ]; then
-    tail -f "$(sv_log)"
+    tail -f "$(ih_log)"
   else
-    tail -40 "$(sv_log)"
+    tail -40 "$(ih_log)"
   fi
 }
 
 main() {
   local cmd="${1:-help}"; shift || true
-  # `sensenova-u1 <cmd> --help` is how anyone finds out what a subcommand takes;
+  # `imagehive <cmd> --help` is how anyone finds out what a subcommand takes;
   # it used to answer "unknown option: --help".
   local arg helper
   for arg in "$@"; do
@@ -606,7 +643,7 @@ main() {
     esac
   done
   case "$cmd" in
-    version|--version|-v) say "sensenova-u1 $SV_VERSION" ;;
+    version|--version|-v) say "imagehive $IH_VERSION" ;;
     status)   cmd_status ;;
     doctor)   cmd_doctor ;;
     models)   cmd_models "$@" ;;
@@ -614,26 +651,26 @@ main() {
     config)   cmd_config "$@" ;;
     generate) cmd_generate "$@" ;;
     options)  cmd_options "$@" ;;
-    start)    sv_service_start && sv_service_announce started ;;
-    stop)     sv_service_stop && sv_service_announce stopped ;;
+    start)    ih_service_start && ih_service_announce started ;;
+    stop)     ih_service_stop && ih_service_announce stopped ;;
     # stop first, then start: `kickstart -k` alone replaces only the process
     # launchd owns, and the daemon is normally started by an MCP front end, so a
     # plain kickstart would leave the old binary serving. stop also reaps whatever
-    # holds the socket (sv_service_reap_stray).
-    restart)  sv_service_stop && sv_service_start && sv_service_announce restarted ;;
+    # holds the socket (ih_service_reap_stray).
+    restart)  ih_service_stop && ih_service_start && ih_service_announce restarted ;;
     logs)     cmd_logs "$@" ;;
-    unload)   sv_unload ;;
+    unload)   ih_unload ;;
     paths)
-      say "home       $(sv_home)"
-      say "config     $(sv_config)"
-      say "service    $(sv_conf)"
-      say "binaries   $(sv_bin_dir)"
-      say "models     $(sv_models)"
-      say "output     $(sv_out_dir)"
-      say "socket     $(sv_socket)"
-      say "log        $(sv_log)"
-      say "launchd    $(sv_plist)"
-      say "cli        $(sv_cli_path)"
+      say "home       $(ih_home)"
+      say "config     $(ih_config)"
+      say "service    $(ih_conf)"
+      say "binaries   $(ih_bin_dir)"
+      say "models     $(ih_models)"
+      say "output     $(ih_out_dir)"
+      say "socket     $(ih_socket)"
+      say "log        $(ih_log)"
+      say "launchd    $(ih_plist)"
+      say "cli        $(ih_cli_path)"
       ;;
     help|--help|-h|"") usage ;;
     *) usage; die "unknown command: $cmd" ;;

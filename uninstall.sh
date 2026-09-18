@@ -30,19 +30,19 @@ while [ "$#" -gt 0 ]; do
     --dry-run)      DRY_RUN=1; shift ;;
     --yes|-y)       ASSUME_YES=1; shift ;;
     --purge-models) PURGE_MODELS=1; shift ;;
-    --home)         SENSENOVA_HOME="${2:-}"; shift 2 ;;
-    --label)        SENSENOVA_LABEL="${2:-}"; shift 2 ;;
-    --prefix)       SENSENOVA_PREFIX="${2:-}"; shift 2 ;;
+    --home)         IMAGEHIVE_HOME="${2:-}"; shift 2 ;;
+    --label)        IMAGEHIVE_LABEL="${2:-}"; shift 2 ;;
+    --prefix)       IMAGEHIVE_PREFIX="${2:-}"; shift 2 ;;
     -h|--help)      usage; exit 0 ;;
     *)              usage; die "unknown option: $1" ;;
   esac
 done
 
-sv_load_conf
+ih_load_conf
 
 run() {
   if [ "$DRY_RUN" = "1" ]; then
-    printf '  %swould run:%s %s\n' "$SV_DIM" "$SV_RESET" "$*" >&2
+    printf '  %swould run:%s %s\n' "$IH_DIM" "$IH_RESET" "$*" >&2
     return 0
   fi
   "$@"
@@ -57,20 +57,26 @@ confirm() {
 }
 
 main() {
-  say "${SV_BOLD}Uninstall${SV_RESET} — $(sv_label)"
+  say "${IH_BOLD}Uninstall${IH_RESET} — $(ih_label)"
   say ""
   say "will remove:"
-  say "  launchd job   $(sv_label) ($(sv_plist))"
-  say "  binaries      $(sv_bin_dir)/sensenova-served, sensenova-mcp, *.bundle"
-  say "  command       $(sv_cli_path), $(sv_prefix)/share/sensenova-u1"
-  say "  MCP entries   any client wired to '${SV_SERVER_NAME}'"
+  say "  launchd job   $(ih_label) ($(ih_plist))"
+  say "  binaries      $(ih_bin_dir)/imagehived, imagehive-mcp, *.bundle"
+  say "  command       $(ih_cli_path), $(ih_prefix)/share/imagehive"
+  say "  MCP entries   any client wired to '${IH_SERVER_NAME}'"
+  if [ -d "$IH_LEGACY_SHARE" ] || [ -e "$IH_LEGACY_CLI" ] || [ -f "$HOME/Library/LaunchAgents/$IH_LEGACY_LABEL.plist" ]; then
+    say "  pre-0.6 names the command, its wrappers, the old launchd job and its MCP entries"
+  fi
   if [ "$PURGE_MODELS" = "1" ]; then
-    say "  models        $(sv_models) (--purge-models)"
+    say "  models        $(ih_models) (--purge-models)"
   else
     say ""
-    say "will keep:"
-    say "  models        $(sv_models) ($(sv_dir_size "$(sv_models)"))"
-    say "  config/logs   $(sv_config), $(sv_conf), $(sv_log)"
+  say "will keep:"
+    say "  models        $(ih_models) ($(ih_dir_size "$(ih_models)"))"
+    say "  config/logs   $(ih_config), $(ih_conf), $(ih_log)"
+    if [ -d "$IH_LEGACY_HOME" ]; then
+      say "  old app home  $IH_LEGACY_HOME ($(ih_dir_size "$IH_LEGACY_HOME")) — delete it yourself once you are sure"
+    fi
   fi
   say ""
 
@@ -83,38 +89,69 @@ main() {
 
   step "clients"
   local name
-  for name in $(sv_client_list); do
-    sv_client_detect "$name" || continue
-    sv_client_has "$name" 2>/dev/null && sv_client_remove "$name" || true
+  for name in $(ih_client_list); do
+    ih_client_detect "$name" || continue
+    ih_client_has "$name" 2>/dev/null && ih_client_remove "$name" || true
   done
 
+  # Anything left under the pre-0.6 names. A daemon still running there is a
+  # second copy of the weights, and its socket is a second socket: uninstalling
+  # only the new name would leave the machine serving from the old one.
+  ih_service_reap_legacy
+  # Found by content, not by name: the label was user-settable (`--label`), so the
+  # default name is only one of the shapes a pre-0.6 job can have.
+  local plist label
+  for plist in "$HOME/Library/LaunchAgents"/*.plist; do
+    [ -f "$plist" ] || continue
+    grep -qE "$IH_LEGACY_DAEMON|$IH_LEGACY_SHARE" "$plist" 2>/dev/null || continue
+    label="$(basename "$plist" .plist)"
+    step "the pre-0.6 job"
+    run launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+    run rm -f "$plist"
+    say "removed the pre-0.6 job $label"
+  done
+  if [ -d "$IH_LEGACY_SHARE" ]; then
+    run rm -rf "$IH_LEGACY_SHARE"
+    say "removed the pre-0.6 command tree $IH_LEGACY_SHARE"
+  fi
+  if [ -e "$IH_LEGACY_CLI" ] || [ -L "$IH_LEGACY_CLI" ]; then
+    run rm -f "$IH_LEGACY_CLI"
+    say "removed the pre-0.6 command name $(basename "$IH_LEGACY_CLI")"
+  fi
   step "service"
-  if sv_service_loaded; then
-    run launchctl bootout "gui/$(id -u)/$(sv_label)" || warn "could not stop the launchd job"
-    say "stopped $(sv_label)"
+  if ih_service_loaded; then
+    run launchctl bootout "gui/$(id -u)/$(ih_label)" || warn "could not stop the launchd job"
+    say "stopped $(ih_label)"
   else
     hint "launchd job was not loaded"
   fi
-  [ -f "$(sv_plist)" ] && { run rm -f "$(sv_plist)"; say "removed $(sv_plist)"; }
-  pkill -f "sensenova-served" >/dev/null 2>&1 || true
-  pkill -f "sensenova-mcp" >/dev/null 2>&1 || true
+  [ -f "$(ih_plist)" ] && { run rm -f "$(ih_plist)"; say "removed $(ih_plist)"; }
+  # Scoped to this layout: the daemon holding *this* socket, and the front ends
+  # started from *this* install's binaries. A blunt `pkill -f imagehived` would also
+  # end a daemon belonging to another --home install — and the real one when this
+  # script runs inside a sandbox HOME.
+  ih_service_reap_stray
+  local stray
+  for stray in $(pgrep -f "$(ih_bin_dir)" 2>/dev/null || true); do
+    kill "$stray" 2>/dev/null || true
+  done
   # The daemon unlinks its socket on SIGTERM, but a wedged or SIGKILLed process
   # leaves the file behind — and "is anything answering on this socket?" is the
   # readiness check used by both installers, so a dead file outliving the service
   # makes the next install's verdict unreliable. Remove it once nothing owns it.
-  if [ -S "$(sv_socket)" ]; then
+  if [ -S "$(ih_socket)" ]; then
     local waited=0
-    while [ "$waited" -lt 20 ] && [ -n "$(sv_socket_owner_pids)" ]; do
+    while [ "$waited" -lt 20 ] && [ -n "$(ih_socket_owner_pids)" ]; do
       sleep 0.25
       waited=$((waited + 1))
     done
-    run rm -f "$(sv_socket)"
-    say "removed the leftover socket $(sv_socket)"
+    run rm -f "$(ih_socket)"
+    say "removed the leftover socket $(ih_socket)"
   fi
 
   step "binaries"
-  local bin; bin="$(sv_bin_dir)"
-  for target in "$bin/sensenova-served" "$bin/sensenova-mcp"; do
+  local bin; bin="$(ih_bin_dir)"
+  for target in "$bin/imagehived" "$bin/imagehive-mcp"; do
     [ -e "$target" ] && { run rm -f "$target"; say "removed $target"; }
   done
   if [ -d "$bin" ]; then
@@ -123,13 +160,13 @@ main() {
       [ -e "$bundle" ] && { run rm -rf "$bundle"; say "removed $(basename "$bundle")"; }
     done
   fi
-  [ -L "$(sv_cli_path)" ] || [ -f "$(sv_cli_path)" ] && { run rm -f "$(sv_cli_path)"; say "removed $(sv_cli_path)"; }
-  [ -d "$(sv_prefix)/share/sensenova-u1" ] && {
-    run rm -rf "$(sv_prefix)/share/sensenova-u1"; say "removed $(sv_prefix)/share/sensenova-u1"; }
+  [ -L "$(ih_cli_path)" ] || [ -f "$(ih_cli_path)" ] && { run rm -f "$(ih_cli_path)"; say "removed $(ih_cli_path)"; }
+  [ -d "$(ih_prefix)/share/imagehive" ] && {
+    run rm -rf "$(ih_prefix)/share/imagehive"; say "removed $(ih_prefix)/share/imagehive"; }
 
   if [ "$PURGE_MODELS" = "1" ]; then
     step "artifacts"
-    for dir in "$(sv_models)"/*; do
+    for dir in "$(ih_models)"/*; do
       [ -d "$dir" ] && { run rm -rf "$dir"; say "removed $dir"; }
     done
   fi
@@ -137,7 +174,7 @@ main() {
   step "done"
   say "The service is gone."
   if [ "$PURGE_MODELS" = "0" ]; then
-    say "Artifacts are still on disk ($(sv_dir_size "$(sv_models)")) so a reinstall is quick:"
+    say "Artifacts are still on disk ($(ih_dir_size "$(ih_models)")) so a reinstall is quick:"
     say "  ./install.sh --model none"
     say "Remove them with: ./uninstall.sh --purge-models"
   fi
