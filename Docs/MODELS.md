@@ -43,6 +43,34 @@ The daemon holds **one** tier at a time: asking for the other tier releases the
 first. `sensenova-u1 status` shows `resident_tier`, `last_peak_mb` and
 `loads_total`.
 
+## One artifact is enough
+
+A machine only needs one of the two artifacts. Both are installed by the same
+machinery and both serve every tool, so which one a machine keeps is a
+disk-and-quality decision, not a capability one:
+
+* a small machine installs `fast-4bit` (11 GiB) and skips the bf16 artifact;
+* a roomy machine installs `quality-bf16` and skips the distilled one.
+
+When a request names a tier whose artifact is not installed, the daemon serves it
+from the artifact that is, and the reply names both:
+
+```
+tier quality, asked for fast, not installed, 50 steps
+```
+
+The **recipe follows the artifact that runs**, never the request: the distilled
+weights are only ever driven at 8 steps with cfg 1.0, the bf16 weights at 50
+steps with cfg 4.0 (an explicit `steps` / `cfg` still wins, as always). A
+fallback therefore cannot quietly produce an out-of-distribution image, it can
+only produce the best image the installed artifact knows how to make.
+
+Where to see it: `model_status` (and `sensenova-u1 status`) report
+`available_tiers`; `sensenova-u1 models` prints each tier's directory and
+whether it is installed; `sensenova-u1 doctor` reports a missing artifact as a
+note, not a failure. The daemon reads `config.json` once at startup, so after
+adding or removing an artifact, `sensenova-u1 restart`.
+
 ## Using artifacts you already have
 
 Point the daemon at any directory with the same shape:
@@ -52,10 +80,13 @@ Point the daemon at any directory with the same shape:
 {
   "ttl_seconds": 600,
   "min_warm_seconds": 60,
-  "fast_artifact": "/absolute/or/relative/path/to/fast",
   "quality_artifact": "/absolute/or/relative/path/to/quality"
 }
 ```
+
+Both tier keys are optional and independent: name the artifact you installed,
+leave the other one out (or pointing at a path that is not there) and the daemon
+serves both tiers from the one it finds.
 
 Relative paths resolve against the models root
 (`~/Library/Application Support/SenseNovaU1/models` by default —

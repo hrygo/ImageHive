@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for the sensenova-u1 CLI and the installers. Sourced, not run.
 
-SV_VERSION="0.2.0"
+SV_VERSION="0.2.1"
 # Layout (see Docs/LAYOUT.md). macOS conventions, every path overridable:
 #   app data  ~/Library/Application Support/SenseNovaU1  (config, socket, weights)
 #   logs      ~/Library/Logs/SenseNovaU1
@@ -83,6 +83,36 @@ sv_artifact_dir() { # fast|quality -> absolute path
     /*) printf '%s\n' "$rel" ;;
     *)  printf '%s\n' "$(sv_models)/$rel" ;;
   esac
+}
+
+# Tiers are a preference, not a requirement. Installers offer a lightweight
+# artifact (fast) and a quality artifact, and a machine that installed only one
+# of them serves every request from it — that is a supported setup, not a broken
+# install — so "which tiers are installed" is the question worth asking, and
+# "this tier is missing" on its own is not an error. The daemon answers it from
+# the same two files (Sources/sensenova-served/main.swift, artifactReady).
+sv_tier_ready() { # fast|quality
+  local dir; dir="$(sv_artifact_dir "$1")"
+  [ -f "$dir/config.json" ] && [ -f "$dir/tokenizer.json" ]
+}
+
+sv_installed_tiers() { # space-separated, best-quality-last order the daemon uses
+  local tier out=""
+  for tier in fast quality; do
+    sv_tier_ready "$tier" && out="${out:+$out }$tier"
+  done
+  printf '%s\n' "$out"
+}
+
+# The tier to use when the caller did not name one: the lightweight artifact is
+# the better default while it is installed (drafts and iteration are the common
+# case), otherwise whatever this machine does have.
+sv_default_tier() {
+  local tier
+  for tier in fast quality; do
+    if sv_tier_ready "$tier"; then printf '%s\n' "$tier"; return 0; fi
+  done
+  printf '%s\n' fast
 }
 
 # --- service.conf ------------------------------------------------------------

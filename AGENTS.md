@@ -29,6 +29,10 @@ documentation.
    daemon holds at most one tier (`cold | fast | quality`). Adding another
    process that can load weights, or another socket, or a second cache, breaks
    the whole point of the project.
+   A tier whose artifact is not installed is *served* from the one that is
+   (`resolveTier`), at that artifact's own recipe — one artifact is a supported
+   install, so never turn "that tier is not installed" into a hard failure, and
+   never let the request's tier pick the step count of the artifact that runs.
 2. **The front end stays stateless.** `sensenova-mcp` must not load weights,
    must not write config, and must not hold state between requests. It may start
    the daemon on demand.

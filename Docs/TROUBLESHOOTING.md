@@ -24,10 +24,19 @@ Xcode 27 ships the Metal toolchain as a separate component:
 xcodebuild -downloadComponent MetalToolchain
 ```
 
-**`artifact missing: …` as an error from a tool call.**
-That tier's artifact is not on disk. `sensenova-u1 models` shows what is there,
-`sensenova-u1 models pull <preset>` gets the rest. Editing and VQA want the
-quality tier.
+**`no model artifact installed: looked for …` as an error from a tool call.**
+Neither tier's artifact is on disk, so there is nothing to serve the request
+from. `sensenova-u1 models` shows what is there; `sensenova-u1 models pull
+fast-4bit` (11 GiB) or `quality-bf16` (33 GiB) installs one. One artifact is
+enough — see [MODELS.md](MODELS.md#one-artifact-is-enough).
+
+**The reply says `asked for fast, not installed` (or `asked for quality`).**
+That is the single-artifact fallback working: this machine installed only the
+other tier, so the daemon served the request from it, at *its* recipe, and named
+both tiers so the caller is not surprised by the step count. Install the missing
+artifact (`sensenova-u1 models pull fast-4bit`) if you want that path, then
+`sensenova-u1 restart`. `available_tiers` in `sensenova-u1 status` lists what the
+daemon can serve.
 
 **A client shows no image tools.**
 MCP servers are started per session — restart the client, then

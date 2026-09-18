@@ -103,17 +103,25 @@ cmd_doctor() {
     || check fail "MLX resource bundles missing" "the daemon dies on the first generation — re-run install.sh"
 
   say "tiers in use"
-  local tier dir
+  local tier dir installed="" absent=""
   for tier in fast quality; do
     dir="$(sv_artifact_dir "$tier")"
-    if [ -f "$dir/config.json" ] && [ -f "$dir/tokenizer.json" ]; then
+    if sv_tier_ready "$tier"; then
+      installed="${installed:+$installed }$tier"
       check ok "$tier -> $(basename "$dir") ($(sv_dir_size "$dir"))"
-    elif [ "$tier" = "fast" ]; then
-      check fail "fast tier artifact missing: $dir" "sensenova-u1 models pull fast-4bit"
     else
-      check warn "quality tier artifact missing: $dir" "editing, VQA and 50-step quality need it"
+      absent="${absent:+$absent }$tier"
+      # Not an error: the daemon serves requests for a missing tier from the
+      # installed one, so a tier that is not installed is only a choice.
+      check warn "$tier tier artifact not installed ($dir)" \
+        "optional — add it with sensenova-u1 models pull $([ "$tier" = fast ] && echo fast-4bit || echo quality-bf16)"
     fi
   done
+  case "$installed" in
+    "") check fail "no model artifact installed" \
+          "sensenova-u1 models pull fast-4bit (11 GiB) or quality-bf16 (33 GiB)" ;;
+    fast|quality) hint "     one artifact installed: requests for the $absent tier are served by $installed" ;;
+  esac
   say "downloaded presets"
   local preset any=0
   for preset in $(sv_preset_names); do
@@ -176,12 +184,19 @@ cmd_models() {
       local tier dir
       for tier in fast quality; do
         dir="$(sv_artifact_dir "$tier")"
-        if [ -f "$dir/config.json" ]; then
+        if sv_tier_ready "$tier"; then
           say "$tier tier    -> $dir ($(sv_dir_size "$dir"))"
         else
-          say "$tier tier    -> $dir (missing)"
+          say "$tier tier    -> $dir (not installed)"
         fi
       done
+      say ""
+      local have; have="$(sv_installed_tiers)"
+      case "$have" in
+        "")      hint "no artifact installed yet — sensenova-u1 models pull fast-4bit" ;;
+        fast)    hint "one artifact: requests for the quality tier are served by the fast artifact" ;;
+        quality) hint "one artifact: requests for the fast tier are served by the quality artifact" ;;
+      esac
       ;;
     pull)
       local what="${1:-}" source="${2:-auto}"
@@ -260,8 +275,16 @@ cmd_config() {
       say "SENSENOVA_SOCKET=$(sv_socket)"
       say "SENSENOVA_MODELS=$(sv_models)"
       say "SENSENOVA_OUT=$(sv_out_dir)"
-      say "SENSENOVA_FAST_ARTIFACT=$(sv_fast_artifact)"
-      say "SENSENOVA_QUALITY_ARTIFACT=$(sv_quality_artifact)"
+      local tier state
+      for tier in fast quality; do
+        state="not installed"
+        if sv_tier_ready "$tier"; then state="installed"; fi
+        if [ "$tier" = fast ]; then
+          say "SENSENOVA_FAST_ARTIFACT=$(sv_fast_artifact) [$state]"
+        else
+          say "SENSENOVA_QUALITY_ARTIFACT=$(sv_quality_artifact) [$state]"
+        fi
+      done
       say "daemon config: $(sv_config)"
       ;;
     set)
@@ -275,7 +298,7 @@ cmd_config() {
 }
 
 cmd_generate() {
-  local prompt="" width=1024 height=1024 tier=fast out="" args="{}"
+  local prompt="" width=1024 height=1024 tier="" args="{}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --prompt) prompt="${2:-}"; shift 2 ;;
@@ -286,6 +309,9 @@ cmd_generate() {
     esac
   done
   [ -n "$prompt" ] || die 'usage: sensenova-u1 generate --prompt "..." [--tier fast|quality] [--width N --height N]'
+  # Whatever is installed decides the default; the daemon would fall back to it
+  # anyway, but naming it here keeps the script readable.
+  [ -n "$tier" ] || tier="$(sv_default_tier)"
   sv_need_python
   mkdir -p "$(sv_out_dir)"
   args="$(python3 -c '

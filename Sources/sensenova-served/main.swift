@@ -7,6 +7,8 @@
 // Responsibilities:
 //   single instance  - socket bind is the mutex; a second process exits
 //   single resident  - one tier loaded at a time, generations serialized
+//   tier tolerant    - a requested tier that is not installed is served by the
+//                      installed one, at that artifact's own recipe
 //   idle unload      - TTL after last use, with a minimum warm time
 //   observable       - loads_total / resident_tier / inflight / queue_depth
 //
@@ -42,7 +44,9 @@ if CommandLine.arguments.dropFirst().contains(where: { $0 == "--version" || $0 =
 ///
 /// Artifact paths are relative to SENSENOVA_MODELS unless absolute. The file is
 /// optional, and environment variables win over it, so `install.sh` can drive
-/// everything without writing one.
+/// everything without writing one. Both tier keys are independent and optional:
+/// name what you installed and the daemon serves the other tier from it
+/// (`resolveTier`), which is what makes a single-artifact machine work.
 struct ServiceConfig {
     var ttlSeconds: Double = 600
     var minWarmSeconds: Double = 60
@@ -94,6 +98,43 @@ func artifactDir(_ tier: String) -> URL {
     return modelsRoot.appendingPathComponent(relative)
 }
 
+/// The tiers a request can name. `fast` is the distilled 8-step path, `quality`
+/// the 50-step reference path; an unrecognised name means `quality`, exactly as
+/// in `artifactDir` above.
+let tierNames = ["fast", "quality"]
+
+func canonicalTier(_ tier: String) -> String {
+    ["fast", "8step", "fast8"].contains(tier) ? "fast" : "quality"
+}
+
+func otherTier(_ tier: String) -> String {
+    canonicalTier(tier) == "fast" ? "quality" : "fast"
+}
+
+/// An artifact is usable when it is complete enough to load: `config.json` for
+/// the architecture and `tokenizer.json` for the prompt plumbing.
+func artifactReady(_ tier: String) -> Bool {
+    let dir = artifactDir(tier)
+    return FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path)
+        && FileManager.default.fileExists(atPath: dir.appendingPathComponent("tokenizer.json").path)
+}
+
+/// Which artifact actually answers a request for `tier`.
+///
+/// Tier is a preference, not a requirement: installers offer a lightweight tier
+/// and a quality tier, and a machine that installed only one of them must still
+/// serve every request, so the installed artifact takes over when the requested
+/// one is not on disk. The *recipe* follows the artifact that runs (see
+/// `generate`), never the request, so distilled weights are never driven with
+/// the 50-step reference recipe and the bf16 weights are never run at 8 steps
+/// with cfg 1.0.
+func resolveTier(_ tier: String) -> String {
+    let wanted = canonicalTier(tier)
+    if artifactReady(wanted) { return wanted }
+    let fallback = otherTier(wanted)
+    return artifactReady(fallback) ? fallback : wanted
+}
+
 // MARK: - PNG output (NCHW float32 in -1..1 -> 8-bit RGB PNG)
 
 enum OutputError: Error { case badShape([Int]), encodeFailed(String) }
@@ -134,6 +175,10 @@ func writePNG(_ image: MLXArray, to url: URL) throws {
 struct Resident: @unchecked Sendable {
     let model: NEOChatModel
     let tokenizer: SenseNovaTokenizer
+    /// The tier actually in memory, which is not always the one the request
+    /// named: a machine with a single artifact serves both tiers from it. The
+    /// generation recipe is read from here, so a fallback cannot mix the two.
+    let tier: String
 }
 
 actor Core {
@@ -151,8 +196,11 @@ actor Core {
     private var pendingLoad: (tier: String, task: Task<Resident, Error>)?
 
     func status() -> [String: Any] {
+        var available: [String] = []
+        for tier in tierNames where artifactReady(tier) { available.append(tier) }
         var out: [String: Any] = [
             "resident_tier": residentTier ?? "cold",
+            "available_tiers": available,
             "loads_total": loadsTotal,
             "inflight": inflight,
             "queue_depth": waiting,
@@ -192,9 +240,14 @@ actor Core {
         }
     }
 
-    private func ensureLoaded(_ tier: String) async throws -> Resident {
+    private func ensureLoaded(_ requested: String) async throws -> Resident {
+        let wanted = canonicalTier(requested)
+        let tier = resolveTier(wanted)
+        if tier != wanted {
+            log("asked for '\(wanted)' but that artifact is not installed — serving from '\(tier)'")
+        }
         if let m = model, let t = tokenizer, residentTier == tier {
-            return Resident(model: m, tokenizer: t)
+            return Resident(model: m, tokenizer: t, tier: tier)
         }
         if let pending = pendingLoad {
             if pending.tier == tier { return try await pending.task.value }
@@ -203,18 +256,21 @@ actor Core {
         }
         if model != nil { release() }
         let dir = artifactDir(tier)
-        guard FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path) else {
+        guard artifactReady(tier) else {
             throw NSError(domain: "sensenova", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: """
-                artifact missing: \(dir.path) — download it with `sensenova-u1 models pull` \
-                or re-run install.sh
+                no model artifact installed: looked for \(artifactDir(wanted).path) and \
+                \(artifactDir(otherTier(wanted)).path) — download one with \
+                `sensenova-u1 models pull fast-4bit` (lightweight, 11 GiB) or \
+                `sensenova-u1 models pull quality-bf16` (33 GiB), or point \
+                \(configURL.path) at an artifact you built
                 """])
         }
         let t0 = Date()
         let task = Task.detached(priority: .userInitiated) { () throws -> Resident in
             let m = try WeightLoading.loadArtifact(from: dir)
             let t = try await SenseNovaTokenizer.load(from: dir)
-            return Resident(model: m, tokenizer: t)
+            return Resident(model: m, tokenizer: t, tier: tier)
         }
         pendingLoad = (tier, task)
         let resident: Resident
@@ -275,10 +331,14 @@ actor Core {
     }
 
     private func generate(_ request: [String: Any], tier: String) async throws -> [String: Any] {
-        let resident = try await ensureLoaded(tier)
+        let wanted = canonicalTier(tier)
+        let resident = try await ensureLoaded(wanted)
         let m = resident.model
         let tok = resident.tokenizer
-        let distilled = tier == "fast"
+        // The recipe belongs to the artifact in memory, not to the request: a
+        // request the installed artifact cannot honour is served at that
+        // artifact's own settings instead of being driven out of distribution.
+        let distilled = resident.tier == "fast"
         let prompt = request["prompt"] as? String ?? ""
         var p = T2IParams()
         p.numSteps = request["steps"] as? Int ?? (distilled ? 8 : 50)
@@ -293,11 +353,13 @@ actor Core {
         eval(image)
         let seconds = Date().timeIntervalSince(t0)
         let url = try writeOutput(image, tag: distilled ? "fast\(p.numSteps)" : "t2i", seed: p.seed)
-        return [
-            "ok": true, "path": url.path, "tier": tier, "seed": Int(p.seed),
+        var out: [String: Any] = [
+            "ok": true, "path": url.path, "tier": resident.tier, "seed": Int(p.seed),
             "steps": p.numSteps, "cfg": Double(p.cfgScale), "width": width, "height": height,
             "seconds": (seconds * 100).rounded() / 100, "peak_mb": MLX.Memory.peakMemory / (1 << 20),
         ]
+        if resident.tier != wanted { out["tier_requested"] = wanted }
+        return out
     }
 
     private func loadReferences(_ request: [String: Any]) throws -> [EditImage] {
@@ -310,7 +372,8 @@ actor Core {
     }
 
     private func edit(_ request: [String: Any], tier: String) async throws -> [String: Any] {
-        let resident = try await ensureLoaded(tier)
+        let wanted = canonicalTier(tier)
+        let resident = try await ensureLoaded(wanted)
         let m = resident.model
         let tok = resident.tokenizer
         let prompt = request["prompt"] as? String ?? ""
@@ -340,15 +403,18 @@ actor Core {
         eval(image)
         let seconds = Date().timeIntervalSince(t0)
         let url = try writeOutput(image, tag: "edit", seed: p.seed)
-        return [
-            "ok": true, "path": url.path, "tier": tier, "seed": Int(p.seed),
+        var out: [String: Any] = [
+            "ok": true, "path": url.path, "tier": resident.tier, "seed": Int(p.seed),
             "steps": p.numSteps, "cfg": Double(p.cfgScale), "width": width, "height": height,
             "seconds": (seconds * 100).rounded() / 100, "peak_mb": MLX.Memory.peakMemory / (1 << 20),
         ]
+        if resident.tier != wanted { out["tier_requested"] = wanted }
+        return out
     }
 
     private func vqa(_ request: [String: Any], tier: String) async throws -> [String: Any] {
-        let resident = try await ensureLoaded(tier)
+        let wanted = canonicalTier(tier)
+        let resident = try await ensureLoaded(wanted)
         let m = resident.model
         let tok = resident.tokenizer
         let question = request["prompt"] as? String ?? ""
@@ -371,9 +437,10 @@ actor Core {
         let seconds = Date().timeIntervalSince(t0)
         let (text, reasoning) = Conversation.splitReasoning(tok.decode(answer))
         var out: [String: Any] = [
-            "ok": true, "text": text, "tier": tier,
+            "ok": true, "text": text, "tier": resident.tier,
             "seconds": (seconds * 100).rounded() / 100, "peak_mb": MLX.Memory.peakMemory / (1 << 20),
         ]
+        if resident.tier != wanted { out["tier_requested"] = wanted }
         if let reasoning { out["reasoning"] = reasoning }
         return out
     }
@@ -436,7 +503,10 @@ try? FileManager.default.createDirectory(
 
 guard let listenFD = openListener(socketPath) else { exit(3) }
 log("listening on \(socketPath) (ttl \(Int(ttlSeconds))s, min warm \(Int(minWarmSeconds))s)")
-log("home \(home.path) | fast \(artifactDir("fast").lastPathComponent) | quality \(artifactDir("quality").lastPathComponent)")
+log("home \(home.path)")
+for tier in tierNames {
+    log("  tier \(tier): \(artifactDir(tier).path)\(artifactReady(tier) ? "" : " [not installed]")")
+}
 
 let sweeper = Thread {
     while true {

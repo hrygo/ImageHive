@@ -257,6 +257,15 @@ JSON
   for dir in "$(sv_models)/$fast" "$(sv_models)/$quality"; do
     [ -f "$dir/config.json" ] || warn "artifact not present yet: $dir"
   done
+  # One artifact is a supported setup: the daemon serves the tiers whose artifact
+  # is missing from the one that is installed, at that artifact's own recipe, and
+  # says so in the reply. Worth a line, since the config names two paths.
+  local have=""
+  [ -f "$(sv_models)/$fast/config.json" ] && have="fast"
+  [ -f "$(sv_models)/$quality/config.json" ] && have="${have:+$have }quality"
+  case "$have" in
+    fast|quality) hint "only the $have artifact is installed — requests for the other tier are served by it (Docs/MODELS.md)" ;;
+  esac
 }
 
 # -------------------------------------------------------------------- build --
@@ -458,7 +467,8 @@ for line in sys.stdin:
   if [ "$DO_SMOKE_GENERATE" = "1" ]; then
     say ""
     say "generating a test image (this also proves the weights load)…"
-    "$(sv_cli_path)" generate --prompt "a small brass compass on a dark wooden desk, soft light" --tier fast
+    # No --tier: the CLI picks whichever artifact this machine has installed.
+    "$(sv_cli_path)" generate --prompt "a small brass compass on a dark wooden desk, soft light"
   fi
 }
 

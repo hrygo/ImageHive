@@ -76,8 +76,13 @@ unload_model.
 Tier choice: tier=fast is the 8-step distilled LoRA (about 6 s for 1024x1024) \
 and is right for drafts, iteration and thumbnails; tier=quality is the 50-step \
 bf16 reference path (about 50 s for 1024x1024) and is right for final art and \
-anything with text in it. Both run at the same memory cost, so pick on quality \
-grounds, not on memory grounds.
+anything with text in it. Both tiers need the same memory while resident, so \
+pick on quality grounds, not on memory grounds. A tier is a preference: a \
+machine may have installed only one of the two artifacts (that is a normal \
+setup), in which case a request for the missing tier is served by the installed \
+one using that artifact's own recipe, and the reply names the tier that \
+actually ran. model_status reports available_tiers, so you can ask which ones \
+this machine has before choosing.
 
 Generations are serialized inside the daemon; a second request waits its turn. \
 Tools return the absolute path of the PNG they wrote - read that file when you \
@@ -258,12 +263,14 @@ func runManagementSwitch(_ flag: String) {
             exit(1)
         }
         let resident = (status["resident_tier"] as? String) ?? "cold"
+        let installed = (status["available_tiers"] as? [String])?.joined(separator: ",") ?? "?"
         let loads = status["loads_total"] as? Int ?? 0
         let inflight = status["inflight"] as? Int ?? 0
         let queued = status["queue_depth"] as? Int ?? 0
         let ttl = status["ttl_seconds"] as? Double ?? 0
         let peak = status["last_peak_mb"] as? Int ?? 0
         print("resident_tier=\(resident)")
+        print("available_tiers=\(installed)")
         print("loads_total=\(loads)")
         print("inflight=\(inflight)")
         print("queue_depth=\(queued)")
@@ -298,7 +305,7 @@ let toolCatalogue: [[String: Any]] = [
     {
       "name": "generate_image",
       "title": "Generate an image",
-      "description": "Draw a new image from a text prompt with the local SenseNova-U1.5 8B model. Returns the absolute path of the PNG it wrote, plus timing. Use tier=fast for drafts and iteration (8-step distilled LoRA, about 6 s at 1024x1024) and tier=quality for final art or anything containing text (50 steps, about 50 s). Both tiers use the same resident weights and cost the same memory. Prompts in Chinese and English both work; for posters or logos put the literal text you want rendered in quotes inside the prompt.",
+      "description": "Draw a new image from a text prompt with the local SenseNova-U1.5 8B model. Returns the absolute path of the PNG it wrote, plus timing. Use tier=fast for drafts and iteration (8-step distilled LoRA, about 6 s at 1024x1024) and tier=quality for final art or anything containing text (50 steps, about 50 s). Both tiers need the same memory while resident; on a machine that installed only one of the two artifacts, the request is served by the installed one at that artifact's own settings and the reply says so. Prompts in Chinese and English both work; for posters or logos put the literal text you want rendered in quotes inside the prompt.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -310,7 +317,7 @@ let toolCatalogue: [[String: Any]] = [
             "type": "string",
             "enum": ["fast", "quality"],
             "default": "quality",
-            "description": "fast = 8-step distilled LoRA (default 8 steps, cfg 1.0); quality = bf16 reference path (default 50 steps, cfg 4.0)."
+            "description": "fast = 8-step distilled LoRA (default 8 steps, cfg 1.0); quality = bf16 reference path (default 50 steps, cfg 4.0). A preference, not a requirement: if that artifact is not installed on this machine the other one serves the request at its own defaults, and the reply's tier field names what actually ran."
           },
           "width": {"type": "integer", "minimum": 256, "default": 1024, "description": "Pixels, multiple of 32."},
           "height": {"type": "integer", "minimum": 256, "default": 1024, "description": "Pixels, multiple of 32."},
@@ -351,7 +358,7 @@ let toolCatalogue: [[String: Any]] = [
             "type": "string",
             "enum": ["fast", "quality"],
             "default": "quality",
-            "description": "fast = 8-step distilled LoRA; quality = 50-step bf16 reference path."
+            "description": "fast = 8-step distilled LoRA; quality = 50-step bf16 reference path. A preference, not a requirement: if that artifact is not installed, the other one serves the request and the reply says which tier ran."
           },
           "width": {"type": "integer", "description": "Output width in pixels; omit to derive it from target_pixels and the reference aspect ratio."},
           "height": {"type": "integer", "description": "Output height in pixels; omit to derive it from target_pixels and the reference aspect ratio."},
@@ -453,6 +460,7 @@ func stringList(_ any: Any?) -> [String]? {
 func summaryLine(_ response: [String: Any]) -> String {
     let path = response["path"] as? String ?? "(no file)"
     let tier = response["tier"] as? String ?? "?"
+    let requested = response["tier_requested"] as? String
     let steps = intValue(response["steps"])
     let width = intValue(response["width"])
     let height = intValue(response["height"])
@@ -461,6 +469,7 @@ func summaryLine(_ response: [String: Any]) -> String {
     var parts: [String] = []
     if let width, let height { parts.append("\(width)x\(height)") }
     parts.append("tier \(tier)")
+    if let requested, requested != tier { parts.append("asked for \(requested), not installed") }
     if let steps { parts.append("\(steps) steps") }
     if let seconds { parts.append(String(format: "%.1fs", seconds)) }
     if let seed { parts.append("seed \(seed)") }
@@ -557,14 +566,16 @@ func runTool(_ name: String, _ arguments: [String: Any]) -> [String: Any] {
     case "model_status":
         let status = (response["status"] as? [String: Any]) ?? [:]
         let resident = (status["resident_tier"] as? String) ?? "cold"
+        let installed = ((status["available_tiers"] as? [String]) ?? []).joined(separator: ",")
         let loads = intValue(status["loads_total"]) ?? 0
         let inflight = intValue(status["inflight"]) ?? 0
         let queued = intValue(status["queue_depth"]) ?? 0
         let ttl = intValue(status["ttl_seconds"]) ?? 0
         let peak = intValue(status["last_peak_mb"]) ?? 0
         content.append(textBlock("""
-        resident_tier=\(resident) loads_total=\(loads) inflight=\(inflight) \
-        queue_depth=\(queued) ttl_seconds=\(ttl) last_peak_mb=\(peak)
+        resident_tier=\(resident) available_tiers=\(installed.isEmpty ? "none" : installed) \
+        loads_total=\(loads) inflight=\(inflight) queue_depth=\(queued) \
+        ttl_seconds=\(ttl) last_peak_mb=\(peak)
         """))
         result["content"] = content
         result["structuredContent"] = status

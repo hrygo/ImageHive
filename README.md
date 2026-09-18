@@ -76,8 +76,25 @@ sensenova-u1 models pull quality-bf16    # add a tier later
 sensenova-u1 models                      # see what is installed
 ```
 
-Editing and VQA always use the quality tier; if only `fast-*` is installed they
-fall back to it (slower, lower fidelity — `sensenova-u1 doctor` says so).
+Editing and VQA run on the quality artifact; `generate_image` is the only tool
+where the two tiers differ.
+
+### One artifact is enough
+
+Installing both artifacts is optional. `tier` is a preference, not a
+requirement: when the artifact it names is not installed, the daemon serves the
+request from the one that is and says so in the reply —
+
+```
+Wrote ~/Pictures/SenseNovaU1/20260918T065356Z-t2i-seed610959.png
+      [512x512, tier quality, asked for fast, not installed, 50 steps, 14.9s, seed 610959]
+```
+
+The recipe follows the artifact that runs, never the request: 8 steps at cfg 1.0
+belong to the distilled weights and 50 steps at cfg 4.0 to the bf16 weights, so a
+fallback can never drive one artifact with the other's settings. `model_status`
+reports `available_tiers`, and `sensenova-u1 doctor` reports a missing artifact as
+a note rather than a failure — a one-artifact machine is a supported setup.
 
 ## Connect your agent
 

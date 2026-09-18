@@ -71,6 +71,22 @@ fi
 export SENSENOVA_FAST_ARTIFACT="${fast_dir:-$SENSENOVA_HOME/artifacts/missing-fast}"
 export SENSENOVA_QUALITY_ARTIFACT="${quality_dir:-$SENSENOVA_HOME/artifacts/missing-quality}"
 
+# Which artifact this host has installed decides what the generation assertions
+# can run on, and whether the single-artifact fallback is exercised. One artifact
+# is a supported setup: the daemon serves a request for the missing tier from the
+# installed one, at that artifact's own recipe.
+installed_tiers=""
+[ -n "$fast_dir" ] && installed_tiers="fast"
+[ -n "$quality_dir" ] && installed_tiers="${installed_tiers:+$installed_tiers }quality"
+present_tier=""
+absent_tier=""
+case "$installed_tiers" in
+  fast)    present_tier=fast;    absent_tier=quality ;;
+  quality) present_tier=quality; absent_tier=fast ;;
+  "")      ;;
+  *)       present_tier="${installed_tiers%% *}" ;;   # both: no fallback to prove
+esac
+
 json_call() { # <id> <method> [params]
   printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$1,\"method\":\"$2\"${3:+,\"params\":$3}}"
 }
@@ -108,19 +124,21 @@ case "$second" in *"another instance is live"*) echo "   second instance refused
 status="$("$mcp" --status)"
 case "$status" in *resident_tier=cold*) echo "   $(echo "$status" | tr '\n' ' ')" ;; *) fail "expected a cold start, got: $status";; esac
 
-if [ "$QUICK" = "1" ] || [ -z "$fast_dir" ]; then
+if [ "$QUICK" = "1" ] || [ -z "$present_tier" ]; then
   [ "$QUICK" = "1" ] && echo "== quick mode: skipping the generation assertions" \
-    || echo "== no fast artifact on this host: skipping the generation assertions"
+    || echo "== no artifact on this host: skipping the generation assertions"
   echo "PASS (protocol)"
   exit 0
 fi
+
+echo "== installed artifacts: ${present_tier} (missing: ${absent_tier})"
 
 echo "== shared weights under concurrency"
 "$mcp" --unload >/dev/null
 client_pids=()
 for i in 1 2 3; do
   (
-    { json_call "1$i" tools/call "{\"name\":\"generate_image\",\"arguments\":{\"prompt\":\"test pattern $i\",\"tier\":\"fast\",\"width\":256,\"height\":256,\"seed\":$i}}"; } \
+    { json_call "1$i" tools/call "{\"name\":\"generate_image\",\"arguments\":{\"prompt\":\"test pattern $i\",\"tier\":\"$present_tier\",\"width\":256,\"height\":256,\"seed\":$i}}"; } \
       | "$mcp" 2>/dev/null > "$work/client$i.json"
   ) &
   client_pids+=($!)
@@ -142,6 +160,37 @@ loads="$("$mcp" --status | awk -F= '$1=="loads_total"{print $2}')"
 residents="$(pgrep -f "sensenova-served" 2>/dev/null | wc -l | tr -d ' ' || true)"
 [ "$residents" -ge 1 ] || fail "daemon disappeared"
 echo "   loads_total=$loads with three concurrent clients"
+
+if [ -n "$absent_tier" ]; then
+echo "== request for the tier that is not installed"
+{ json_call 21 tools/call "{\"name\":\"generate_image\",\"arguments\":{\"prompt\":\"fallback probe\",\"tier\":\"$absent_tier\",\"width\":256,\"height\":256,\"seed\":9}}"; } \
+  | "$mcp" 2>/dev/null > "$work/fallback.json"
+fallback="$(python3 -c '
+import json, sys
+message = json.loads(open(sys.argv[1]).read().split("\n")[0])
+result = message["result"]
+if result.get("isError"):
+    print("ERROR " + result["content"][0]["text"])
+else:
+    structured = result.get("structuredContent", {})
+    print("%s|%s|%s" % (structured.get("tier"), structured.get("tier_requested"),
+                        result["content"][0]["text"]))
+' "$work/fallback.json")"
+case "$fallback" in
+  ERROR*) fail "a request for the tier this host did not install was not served: $fallback" ;;
+esac
+fb_tier="${fallback%%|*}"; fb_requested="${fallback#*|}"; fb_requested="${fb_requested%%|*}"
+fb_text="${fallback#*|*|}"
+[ "$fb_tier" = "$present_tier" ] \
+  || fail "expected the $present_tier artifact to answer, got tier '$fb_tier'"
+[ "$fb_requested" = "$absent_tier" ] \
+  || fail "the reply should name the tier that was asked for, got '$fb_requested'"
+case "$fb_text" in *"tier $present_tier"*) echo "   $fb_text" ;;
+  *) fail "the reply does not name the tier that answered: $fb_text" ;;
+esac
+else
+  echo "== both artifacts installed: nothing to fall back to"
+fi
 
 echo "== release"
 "$mcp" --unload | sed 's/^/   /'

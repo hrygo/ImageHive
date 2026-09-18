@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.1 — 2026-09-18
+
+**One artifact is enough.** `tier` is a preference, not a requirement — the docs
+said so and the daemon did not, so a machine with a single artifact failed the
+requests aimed at the other one.
+
+* `sensenova-served` resolves the requested tier against what is installed and
+  serves the request from the installed artifact when the requested one is
+  missing (`resolveTier`, either direction). The recipe follows the artifact in
+  memory — `fast` keeps 8 steps at cfg 1.0, `quality` keeps 50 steps at cfg 4.0 —
+  so a fallback can never drive distilled weights with the reference recipe or
+  the other way round.
+* Replies name both tiers (`"tier": "quality", "tier_requested": "fast"`), the
+  human line reads `tier quality, asked for fast, not installed`, and
+  `model_status` reports `available_tiers`.
+* `sensenova-u1 doctor` reports a missing tier as a note instead of a failure;
+  `models` and `config show` mark each tier installed/not installed; `generate`
+  without `--tier` picks whichever artifact this machine has.
+* `install.sh` says so when only one artifact was installed, and its optional
+  `--smoke-generate` no longer assumes the fast tier exists.
+* `tests/smoke.sh` runs its generation assertions on whichever artifact the host
+  has and, on a one-artifact machine, proves the fallback by requesting the tier
+  that is not installed.
+* [Docs/MODELS.md](Docs/MODELS.md) — "One artifact is enough";
+  [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md) — the new messages.
+
 ## 0.2.0 — 2026-09-18
 
 **Install layout follows platform conventions** (rationale and sources in
