@@ -70,7 +70,18 @@ ls "$src"/prebuilt/*.bundle >/dev/null 2>&1 || fail "no MLX resource bundles (th
 ok "everything install.sh reads is present"
 
 echo "== 3. quarantine the copy, as a download would leave it"
-xattr -wr com.apple.quarantine "0081;00000000;Safari;" "$src"
+# Applied item by item rather than with a single `xattr -wr`: a resource inside a
+# bundle can be read-only, and xattr refuses to write to a file the caller cannot
+# write (measured: `xattr: [Errno 13] Permission denied`, which under `set -e`
+# aborted the whole run). That refusal is about the file's mode, not about the
+# release, and a quarantined non-executable changes nothing — Gatekeeper gates
+# execution. install.sh tolerates the same case.
+aq="0081;00000000;Safari;"
+skipped=0
+while IFS= read -r -d '' item; do
+  xattr -w com.apple.quarantine "$aq" "$item" 2>/dev/null || skipped=$((skipped + 1))
+done < <(find "$src" -print0)
+[ "$skipped" = "0" ] || ok "$skipped read-only files refused the flag (harmless: they are not executables)"
 xattr -p com.apple.quarantine "$src/prebuilt/sensenova-served" >/dev/null 2>&1 \
   || fail "could not set the quarantine flag (the test would prove nothing)"
 ok "prebuilt/sensenova-served is quarantined"

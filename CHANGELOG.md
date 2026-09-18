@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+* `scripts/verify_release.sh` no longer aborts on read-only files. It quarantined the
+  extracted copy with one recursive `xattr -wr`, and xattr refuses a file the caller
+  cannot write — a macOS resource inside a bundle can be mode 444 in an archive built
+  by another toolchain, which made the check die with `[Errno 13] Permission denied`
+  after steps 1 and 2 had already passed. The flag is now applied per item, the count
+  of refusals is reported, and the assertion that matters (the binaries are
+  quarantined, then unquarantined by `install.sh`) is unchanged. Reproduced locally
+  with a 444-resource archive: the old script failed exactly as CI did, the new one
+  passes. `install.sh` already tolerated the same case.
+* `install.sh` no longer refuses to install, or to print a dry run, when the machine
+  is below the artifact memory floor and no artifact is involved. `--model none`
+  stages the binaries without weights, and a dry run exists precisely so someone on a
+  small machine can see what an install would do; both used to hit the same `die` as
+  a real 15 GB install. The gate itself is unchanged where it belongs: a real install
+  that would run weights still stops on a machine under 18 GB.
 * `LICENSE` is a plain MIT text again, with the fork's copyright line next to the
   upstream one; the scope of the fork's additions is still spelled out in
   `NOTICE`. The addendum that used to sit after the MIT body made GitHub report

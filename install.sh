@@ -125,9 +125,24 @@ preflight() {
   esac
 
   local ram; ram="$(sv_host_ram_gb)"
-  [ "$ram" -ge 18 ] || die "unified memory ${ram}GB is too small (the smallest artifact peaks around 15GB)"
-  [ "$ram" -ge 32 ] && hint "unified memory ${ram}GB" \
-    || warn "unified memory ${ram}GB — the 4-bit tier fits, but close other heavy apps"
+  if [ "$ram" -ge 32 ]; then
+    hint "unified memory ${ram}GB"
+  elif [ "$ram" -ge 18 ]; then
+    warn "unified memory ${ram}GB — the 4-bit tier fits, but close other heavy apps"
+  elif [ "$MODEL_CHOICE" = "none" ]; then
+    # No weights are being installed, so nothing here will ever be run. The gate
+    # belongs to the moment an artifact is chosen (`sensenova-u1 models`), and
+    # blocking `--model none` would make it impossible to stage the binaries on a
+    # small machine — or, in CI, to install a release tarball on a runner.
+    hint "unified memory ${ram}GB — no model artifact is being installed"
+  elif [ "$DRY_RUN" = "1" ]; then
+    # A dry run is how someone on a small machine finds out what installing would
+    # take; refusing to even print the plan would hide that. The gate still applies
+    # to a real install, one line below.
+    warn "unified memory ${ram}GB is below the smallest artifact's peak (~15GB) — a real install would refuse here"
+  else
+    die "unified memory ${ram}GB is too small (the smallest artifact peaks around 15GB)"
+  fi
 
   if [ "$DO_BUILD" = "no" ]; then
     [ -x "$REPO_DIR/prebuilt/sensenova-served" ] \
