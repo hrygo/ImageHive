@@ -10,9 +10,15 @@
 因此首个公开版是 `0.5.0`。发行包里的 `BUILD-INFO.txt` 记录所基于的上游提交；两套编号互不
 相干——上游自己的 tag（`v0.1.0`…`v0.4.0`）不是本仓库的发行版。
 
-**实际发布过什么**：`0.5.0` 与 `0.5.2` 有 tag、有归档、有 GitHub Release 页面。`0.5.0`
-以下的编号——`0.1.0`、`0.2.0`、`0.2.1`，以及私有的 `0.3.x`（本文件没有条目）——都是私下
-构建、从未发布；`0.5.1` 没有单独打过 tag，它的改动随 `0.5.2` 的归档首次发布。没有链接的
+**实际发布过什么**：`0.5.0` 与 `0.5.2` 打过 tag（`v0.5.0`、`v0.5.2`），也各自发过 GitHub
+Release 页面。改名到 imagehive 时那两个 Release **连同资产一起删掉了**：资产名还带着旧名字，
+而 `releases/latest/download/<名字>` 只解析最新的那个 Release，留着只会把人引到 404 或引向
+一个叫 `sensenova-u1` 的包。tag 保留，构建机上那份归档也保留
+（`dist/sensenova-u1-0.5.0-macos-arm64.tar.gz`、`…-0.5.2-…`，sha256 与当时上传的资产一致，
+实测 2026-09-18），要重新挂上去随时可以。
+
+`0.5.0` 以下的编号——`0.1.0`、`0.2.0`、`0.2.1`，以及私有的 `0.3.x`（本文件没有条目）——都是
+私下构建、从未发布；`0.5.1` 没有单独打过 tag，它的改动随 `0.5.2` 的归档首次发布。没有链接的
 标题，就是没有 tag 可比对的那几个版本。
 
 **怎么发一个版本**：bump `IH_VERSION` → `make release-verify` → 打 tag `v<版本>` 并 push
@@ -74,6 +80,11 @@ socket 文件名、发行归档名。这是破坏性变更——写进 shell pro
 * **内部标识一并改名**：`sv_*` / `SV_*` 辅助前缀改为 `ih_*` / `IH_*`，`IMAGEHIVE_SERVED_BIN`
   改为 `IMAGEHIVE_DAEMON_BIN`，Swift 里的 `spawnServed` / `servedBinaryPath` 改为
   `spawnDaemon` / `daemonBinaryPath`。
+* **GitHub 侧一起改**：仓库 `hrygo/SenseNovaU1-Service` → `hrygo/ImageHive`（旧地址 301
+  重定向到新地址，实测 2026-09-18）；About 重写——原来写的是 "five MCP tools"，实际是六个；
+  topics 补上 `mcp-server`、`model-context-protocol`、`image-generation`、`image-editing`、
+  `vision-language-model`、`ai-agents`、`sensenova-u1`，让搜索能找到它。`0.5.x` 的两个
+  Release 页面与资产删除，只保留 tag（理由与恢复方式见本文件开头"实际发布过什么"）。
 
 ### 新增
 
