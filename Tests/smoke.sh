@@ -41,6 +41,7 @@ mcp="$REPO_DIR/.build/release/sensenova-mcp"
 
 export SENSENOVA_HOME="$work/home"
 export SENSENOVA_SOCKET="$work/served.sock"
+export SENSENOVA_OUT="$work/out"
 export SENSENOVA_TTL_SECONDS=30
 export SENSENOVA_MIN_WARM_SECONDS=5
 mkdir -p "$SENSENOVA_HOME"
@@ -108,7 +109,7 @@ for line in sys.stdin:
         print(",".join(message["result"]["supportedVersions"]))
 ' 2>/dev/null || true)"
 [ -n "$tools" ] || fail "tools/list returned nothing"
-case "$tools" in *generate_image*edit_image*describe_image*model_status*unload_model*) ;; *) fail "unexpected tools: $tools";; esac
+case "$tools" in *generate_image*edit_image*describe_image*model_options*model_status*unload_model*) ;; *) fail "unexpected tools: $tools";; esac
 echo "   tools: $tools"
 case "$versions" in *2026-07-28*) echo "   server/discover: $versions";; *) fail "server/discover did not advertise 2026-07-28";; esac
 
@@ -195,5 +196,94 @@ fi
 echo "== release"
 "$mcp" --unload | sed 's/^/   /'
 "$mcp" --status | grep -q 'resident_tier=cold' || fail "unload did not return to cold"
+
+echo "== what the model accepts (model_options)"
+{ json_call 31 tools/call '{"name":"model_options","arguments":{}}'; } | "$mcp" 2>/dev/null > "$work/options.json"
+options="$(python3 -c '
+import json, sys
+result = json.loads(open(sys.argv[1]).read().split("\n")[0])["result"]
+if result.get("isError"):
+    print("ERROR " + result["content"][0]["text"])
+else:
+    options = result.get("structuredContent", {})
+    sizes = options.get("sizes", {})
+    negative = options.get("negative_prompt", {})
+    print("%s | negative generate=%s edit=%s"
+          % (sizes.get("rule", ""), negative.get("generate"), negative.get("edit")))
+' "$work/options.json")"
+case "$options" in
+  ERROR*) fail "model_options failed: $options" ;;
+  *"multiples of 32"*"generate=True edit=False"*) echo "   $options" ;;
+  *) fail "model_options did not report the size rule and the negative asymmetry: $options" ;;
+esac
+
+echo "== a size the model cannot render is refused, and the daemon survives it"
+{ json_call 32 tools/call '{"name":"generate_image","arguments":{"prompt":"bad size","width":1000,"height":1000}}'; } \
+  | "$mcp" 2>/dev/null > "$work/badsize.json"
+bad="$(python3 -c '
+import json, sys
+result = json.loads(open(sys.argv[1]).read().split("\n")[0])["result"]
+print(("ERROR " if result.get("isError") else "ACCEPTED ") + result["content"][0]["text"])
+' "$work/badsize.json")"
+case "$bad" in
+  "ERROR"*"multiple of 32"*) echo "   $bad" ;;
+  *) fail "a size that is not a multiple of 32 was not refused with an explanation: $bad" ;;
+esac
+# Until this check existed, MLX aborted the whole process on this request and every
+# other client of the shared model died with it.
+"$mcp" --status >/dev/null 2>&1 || fail "the daemon did not survive a size it cannot render"
+
+echo "== the same seed writes the same bytes, and every image has a sidecar"
+for n in 1 2; do
+  { json_call "4$n" tools/call "{\"name\":\"generate_image\",\"arguments\":{\"prompt\":\"reproducibility probe\",\"tier\":\"$present_tier\",\"width\":256,\"height\":256,\"steps\":4,\"seed\":777}}"; } \
+    | "$mcp" 2>/dev/null > "$work/seed$n.json"
+done
+python3 - "$work/seed1.json" "$work/seed2.json" <<'PY' || fail "seed/metadata assertions failed (see above)"
+import hashlib, json, os, sys
+
+def load(path):
+    result = json.loads(open(path).read().split("\n")[0])["result"]
+    if result.get("isError"):
+        sys.exit("generate_image failed: " + result["content"][0]["text"])
+    return result["structuredContent"]
+
+first, second = load(sys.argv[1]), load(sys.argv[2])
+for name, r in (("first", first), ("second", second)):
+    assert r.get("seed") == 777, ("seed", name, r.get("seed"))
+    assert r.get("seed_source") == "explicit", ("seed_source", name, r.get("seed_source"))
+    assert r.get("metadata"), ("no sidecar path in the reply", name, sorted(r))
+
+record = json.load(open(first["metadata"]))
+assert os.path.basename(first["metadata"]) == os.path.basename(first["path"]) + ".json"
+assert record["prompt_sha256"] == hashlib.sha256(record["prompt"].encode()).hexdigest()
+for key in ("seed", "seed_source", "width", "height", "steps", "cfg", "tier", "artifact", "seconds"):
+    assert key in record, ("sidecar is missing " + key, sorted(record))
+
+same = open(first["path"], "rb").read() == open(second["path"], "rb").read()
+print("   %s vs %s: identical=%s, sidecar keys=%d"
+      % (os.path.basename(first["path"]), os.path.basename(second["path"]), same, len(record)))
+assert same, "the same seed produced different bytes"
+PY
+
+echo "== status answers while a generation is running"
+( { json_call 51 tools/call "{\"name\":\"generate_image\",\"arguments\":{\"prompt\":\"slow probe\",\"tier\":\"$present_tier\",\"width\":768,\"height\":768,\"steps\":30,\"seed\":11}}"; } \
+    | "$mcp" 2>/dev/null > "$work/slow.json" ) &
+slow_pid=$!
+sleep 3
+if kill -0 "$slow_pid" 2>/dev/null; then
+  started="$(python3 -c 'import time; print(time.time())')"
+  during="$("$mcp" --status)"
+  took="$(python3 -c "import time; print(round(time.time() - float('$started'), 1))")"
+  case "$during" in
+    *"current="*) echo "   answered in ${took}s while busy: $(printf '%s' "$during" | tr '\n' ' ')" ;;
+    *) echo "   answered in ${took}s (the job had already finished)" ;;
+  esac
+  # Queued behind the job, this call would take as long as the job does.
+  python3 -c "import sys; sys.exit(0 if float('$took') < 10 else 1)" \
+    || fail "status was queued behind the generation (${took}s): the actor is blocking again"
+else
+  echo "   (the job finished before it could be observed)"
+fi
+wait "$slow_pid" || true
 
 echo "PASS"

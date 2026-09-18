@@ -62,6 +62,7 @@ echo "== 2. the archive is self-contained"
 for need in install.sh uninstall.sh README.md README.zh-CN.md LICENSE NOTICE CHANGELOG.md \
             prebuilt/sensenova-served prebuilt/sensenova-mcp \
             cli/sensenova-u1 cli/lib/common.sh cli/lib/models.sh cli/lib/clients.sh \
+            cli/lib/generate_result.py cli/lib/progress.py \
             Docs/MODELS.md Docs/LAYOUT.md Docs/CLIENTS.md Docs/DISTRIBUTING.md \
             Docs/DISTRIBUTING.zh-CN.md Docs/TROUBLESHOOTING.md BUILD-INFO.txt; do
   [ -e "$src/$need" ] || fail "missing from the archive: $need"

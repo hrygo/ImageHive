@@ -36,10 +36,12 @@ uninstall:
 	./uninstall.sh
 
 test: build
-	./tests/smoke.sh
+	Tests/smoke.sh
+	Tests/cli.sh
 
 test-quick: build
-	./tests/smoke.sh --quick
+	Tests/smoke.sh --quick
+	Tests/cli.sh --quick
 
 doctor:
 	./cli/sensenova-u1 doctor

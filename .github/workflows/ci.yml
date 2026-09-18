@@ -56,9 +56,10 @@ jobs:
       # developer; a syntax error in one of them is a broken release.
       - name: Shell syntax
         run: |
-          for script in install.sh uninstall.sh cli/sensenova-u1 cli/lib/*.sh scripts/*.sh Tests/smoke.sh; do
+          for script in install.sh uninstall.sh cli/sensenova-u1 cli/lib/*.sh scripts/*.sh Tests/smoke.sh Tests/cli.sh; do
             bash -n "$script"
           done
+          python3 -m py_compile cli/lib/*.py
 
   release:
     # The macOS runners bill at ten times the Linux rate, and this job is the
