@@ -112,6 +112,16 @@ Both test scripts write into a scratch `HOME`/output directory; keep it that way
 `Tests/smoke.sh` used to inherit the user's real `~/Pictures/SenseNovaU1` and
 quietly filled it with smoke images.
 
+**The daemon is not owned by launchd.** Whichever MCP front end needs it first
+forks it (`spawnServed`), and it survives that front end; the launchd job exists
+so a machine has a copy after login. `bootout` + `bootstrap` therefore does *not*
+replace a running daemon — it fails to bind and exits 3 while the old process
+keeps serving, which is how a reinstall can look successful and change nothing
+(measured 2026-09-18). `sv_service_stop` reaps whatever holds the socket
+(`sv_service_reap_stray`); any new way of starting or replacing the daemon has to
+do the same, and any upgrade path should assert the version the daemon reports
+(`sensenova-u1 status` → `project_version=`).
+
 **Never test installers against your real home.** Point `HOME` at a scratch
 directory and give the job its own label; this exercises the whole path
 (binaries, config, LaunchAgent, wrappers) without touching the installed

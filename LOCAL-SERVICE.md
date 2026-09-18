@@ -90,6 +90,11 @@ git rebase origin/main local/main
   进度由调用方轮询 `current`，不往 socket 上发消息——保持一行请求一行响应。
 - **校验前移**：尺寸/步数/seed 在任何权重加载之前校验。模型渲染不了的尺寸不是失败请求，
   而是不可捕获的 `[reshape]` fatal（实测 1000x1000 会带走整个共用服务）。
+- **守护进程由前端 fork，不由 launchd 拥有**：常驻进程是"第一个需要它的 MCP 前端"
+  直接拉起的（`spawnServed`），launchd 的 job 只是让它在登录后有个位子。后果是：换掉二进制
+  之后旧进程仍占着 socket，job 绑定失败（`last exit code = 3`），而所有应答仍来自旧版本——
+  实测重装后 `options` 回 `unknown cmd`，输出里没有任何线索。因此 `stop`/`restart`/安装器都会
+  先接管 socket（`sv_service_reap_stray`），`status` 与 `doctor` 也会报出正在应答的进程与版本。
 - 权重目录与构建目录分离：权重在 `~/Library/Application Support/SenseNovaU1/models`（本机 33GB，只留品质档），
   可执行文件在 `~/.local/share/sensenova-u1`，出图在 `~/Pictures/SenseNovaU1`；本仓库只放代码。
   选择依据与迁移方式见 `Docs/LAYOUT.md`。

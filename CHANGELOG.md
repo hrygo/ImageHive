@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+**Reinstalling now actually changes what runs.** Found by doing it: the daemon
+that answers is normally started by whichever MCP front end needed it first
+(`spawnServed`), not by the launchd job, and that process outlives every front
+end that started it. Replacing the binaries therefore left it holding the socket:
+the launched job exited 3 without binding, the install reported success, and
+every answer still came from the previous build — measured by a reinstall whose
+`options` call was answered with `unknown cmd 'options'`.
+
+* `stop`, `restart` and `install.sh` now hand the socket over: after the launchd
+  job is stopped, whatever still holds the socket is terminated — but only if its
+  command line names `sensenova-served`, so a client that happens to have the
+  socket open is left alone. `restart` is now stop-then-start rather than
+  `kickstart -k`, which only ever replaced the process launchd owned.
+* `status` reports `pid`, `project_version` and `protocol`, so "which build is
+  answering?" has an answer from the outside. `doctor` compares them with the
+  installed CLI and says `the daemon answering reports version X, this install is
+  Y` (a daemon older than 0.5.1 reports no version at all, which is the same
+  signal), and the installer warns when the daemon left behind after the install
+  is not the build it just wrote.
+* Tests: `Tests/cli.sh` asserts that a daemon started by hand — which is how the
+  normal install runs it — is ended by `stop`, that the socket is released, and
+  that `status` names the process and the build.
+* [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md): "I reinstalled, and the
+  behaviour did not change."
+
 ## 0.5.1 — 2026-09-18
 
 **A run is now reproducible, self-describing and scriptable — and a bad request

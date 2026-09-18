@@ -75,6 +75,18 @@ idle (default 600 s). Raise `ttl_seconds` in
 `~/Library/Application Support/SenseNovaU1/config.json`
 if you would rather stay warm, or call `sensenova-u1 unload` when you are done.
 
+**I reinstalled, and the behaviour did not change.**
+The daemon answering is normally started by whichever MCP client needed it first,
+not by the launchd job, and such a process keeps the socket after you replace the
+binaries: the launched job then fails to bind (`last exit code = 3` in
+`launchctl print gui/$(id -u)/com.hrygo.sensenova-u1`) while every answer still
+comes from the previous build. Installing, `sensenova-u1 stop` and
+`sensenova-u1 restart` all end whatever holds the socket, so start there —
+`sensenova-u1 restart`, then `sensenova-u1 status`, which names the process and
+the build (`pid=`, `project_version=`). `doctor` reports a mismatch as
+`the daemon answering reports version X, this install is Y`. A daemon from before
+0.5.1 does not report a version at all, which is the same signal.
+
 **`width 833 is not a multiple of 32` (or the same for `height`).**
 The model renders on a latent grid of `size/32`, so both dimensions have to be
 multiples of 32 (32–4096 px). The message names the nearest valid value: use it.
