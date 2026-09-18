@@ -1,5 +1,9 @@
 # Distributing this service
 
+> [中文版](DISTRIBUTING.zh-CN.md) — the recipient-facing guide is also available
+> in Chinese ([README.zh-CN.md](../README.zh-CN.md)), and both ship inside the
+> release archive.
+
 For whoever hands this to someone else — a colleague, a friend, a machine with no
 developer tools on it. Being usable by a non-developer is a requirement of this
 project, so the rules below are not cosmetic.

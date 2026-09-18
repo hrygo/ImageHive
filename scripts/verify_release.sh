@@ -59,11 +59,11 @@ src="$(find "$work" -maxdepth 1 -type d -name 'sensenova-u1-*' | head -1)"
 ok "$(basename "$tarball") verified"
 
 echo "== 2. the archive is self-contained"
-for need in install.sh uninstall.sh README.md LICENSE NOTICE CHANGELOG.md \
+for need in install.sh uninstall.sh README.md README.zh-CN.md LICENSE NOTICE CHANGELOG.md \
             prebuilt/sensenova-served prebuilt/sensenova-mcp \
             cli/sensenova-u1 cli/lib/common.sh cli/lib/models.sh cli/lib/clients.sh \
             Docs/MODELS.md Docs/LAYOUT.md Docs/CLIENTS.md Docs/DISTRIBUTING.md \
-            Docs/TROUBLESHOOTING.md BUILD-INFO.txt; do
+            Docs/DISTRIBUTING.zh-CN.md Docs/TROUBLESHOOTING.md BUILD-INFO.txt; do
   [ -e "$src/$need" ] || fail "missing from the archive: $need"
 done
 ls "$src"/prebuilt/*.bundle >/dev/null 2>&1 || fail "no MLX resource bundles (the daemon would die on the first image)"

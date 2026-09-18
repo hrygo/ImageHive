@@ -50,7 +50,7 @@ release: build
 	@mkdir -p "dist/$(NAME)/prebuilt"
 	@cp .build/release/sensenova-served .build/release/sensenova-mcp "dist/$(NAME)/prebuilt/"
 	@for bundle in .build/release/*.bundle; do cp -R "$$bundle" "dist/$(NAME)/prebuilt/"; done
-	@cp install.sh uninstall.sh README.md LICENSE NOTICE CHANGELOG.md "dist/$(NAME)/"
+	@cp install.sh uninstall.sh README.md README.zh-CN.md LICENSE NOTICE CHANGELOG.md "dist/$(NAME)/"
 	@cp -R cli Docs "dist/$(NAME)/"
 	@rm -rf "dist/$(NAME)/cli/__pycache__" "dist/$(NAME)/cli/lib/__pycache__"
 	@printf 'sensenova-u1 %s\nrevision   %s\nbuilt      %s\nbuilt on   macOS %s %s\n' "$(VERSION)" "$(REVISION)" "$$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$$(sw_vers -productVersion)" "$$(uname -m)" > "dist/$(NAME)/BUILD-INFO.txt"

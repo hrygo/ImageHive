@@ -1,5 +1,9 @@
 # SenseNova-U1.5 local image service
 
+> [中文文档](README.zh-CN.md) · Chinese guide: [README.zh-CN.md](README.zh-CN.md),
+> [Docs/DISTRIBUTING.zh-CN.md](Docs/DISTRIBUTING.zh-CN.md). English is the
+> authoritative version.
+
 Text-to-image, instruction-based image editing and image understanding for your
 own Mac — served to AI agents over MCP. No API key, no per-image cost, no uploads:
 the model runs locally on Apple silicon through MLX, and every agent on the

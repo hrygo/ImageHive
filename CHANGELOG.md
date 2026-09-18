@@ -44,6 +44,11 @@ first launch; both are fixed and verified by `make release-verify`.
   [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md) covers the quarantine hang,
   the python3 requirement, a stalled-looking download and the `PATH` gap; the
   README gained an Xcode-free quick start.
+* **中文文档**：[README.zh-CN.md](README.zh-CN.md) 是完整中文首页（快速开始、安装
+  位置、前置条件、档位与单档回退、客户端接线、日常命令、常见问题），
+  [Docs/DISTRIBUTING.zh-CN.md](Docs/DISTRIBUTING.zh-CN.md) 是中文交付指南（交付
+  什么、对方怎么做、为什么用 `bash install.sh`、离线安装、交付前清单）。两者都随
+  归档发布，英文文档仍为权威版本；英文首页与交付指南都加了中文入口链接。
 
 ## 0.2.1 — 2026-09-18
 
