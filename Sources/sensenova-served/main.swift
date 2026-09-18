@@ -12,8 +12,8 @@
 //
 // Configuration: $SENSENOVA_HOME/config.json (see ServiceConfig below), with
 // environment variables (SENSENOVA_HOME, SENSENOVA_CONFIG, SENSENOVA_TTL_SECONDS,
-// SENSENOVA_MIN_WARM_SECONDS, SENSENOVA_SOCKET, SENSENOVA_FAST_ARTIFACT,
-// SENSENOVA_QUALITY_ARTIFACT) overriding it. Both are optional: with neither,
+// SENSENOVA_MIN_WARM_SECONDS, SENSENOVA_SOCKET, SENSENOVA_MODELS, SENSENOVA_OUT,
+// SENSENOVA_FAST_ARTIFACT, SENSENOVA_QUALITY_ARTIFACT) overriding it. Both are optional: with neither,
 // the defaults below describe a stock `install.sh` layout.
 
 import CoreGraphics
@@ -36,18 +36,18 @@ if CommandLine.arguments.dropFirst().contains(where: { $0 == "--version" || $0 =
 ///     {
 ///       "ttl_seconds": 600,
 ///       "min_warm_seconds": 60,
-///       "fast_artifact": "artifacts/SenseNova-U1.5-8B-MoT-8step-4bit",
-///       "quality_artifact": "artifacts/SenseNova-U1.5-8B-MoT-bf16"
+///       "fast_artifact": "SenseNova-U1.5-8B-MoT-8step-4bit",
+///       "quality_artifact": "SenseNova-U1.5-8B-MoT-bf16"
 ///     }
 ///
-/// Artifact paths are relative to SENSENOVA_HOME unless absolute. The file is
+/// Artifact paths are relative to SENSENOVA_MODELS unless absolute. The file is
 /// optional, and environment variables win over it, so `install.sh` can drive
 /// everything without writing one.
 struct ServiceConfig {
     var ttlSeconds: Double = 600
     var minWarmSeconds: Double = 60
-    var fastArtifact = "artifacts/SenseNova-U1.5-8B-MoT-8step-4bit"
-    var qualityArtifact = "artifacts/SenseNova-U1.5-8B-MoT-bf16"
+    var fastArtifact = "SenseNova-U1.5-8B-MoT-8step-4bit"
+    var qualityArtifact = "SenseNova-U1.5-8B-MoT-bf16"
 
     static func load(from url: URL) -> ServiceConfig {
         var config = ServiceConfig()
@@ -64,9 +64,14 @@ struct ServiceConfig {
     }
 }
 
+// $HOME first, then the passwd entry: the shell CLI and the installers all use
+// $HOME, so honouring it here keeps a sandboxed or overridden HOME consistent
+// instead of silently reaching back into the real user's app home.
+let userHome = environmentForConfig["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
 let home = URL(fileURLWithPath: environmentForConfig["SENSENOVA_HOME"]
-    ?? FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Models/SenseNova-U1.5").path)
+    ?? "\(userHome)/Library/Application Support/SenseNovaU1")
+let modelsRoot = URL(fileURLWithPath: environmentForConfig["SENSENOVA_MODELS"]
+    ?? home.appendingPathComponent("models").path)
 let configURL = URL(fileURLWithPath: environmentForConfig["SENSENOVA_CONFIG"]
     ?? home.appendingPathComponent("config.json").path)
 let serviceConfig = ServiceConfig.load(from: configURL)
@@ -75,9 +80,9 @@ let minWarmSeconds = environmentForConfig["SENSENOVA_MIN_WARM_SECONDS"].flatMap(
 let fastArtifact = environmentForConfig["SENSENOVA_FAST_ARTIFACT"] ?? serviceConfig.fastArtifact
 let qualityArtifact = environmentForConfig["SENSENOVA_QUALITY_ARTIFACT"] ?? serviceConfig.qualityArtifact
 let socketPath = environmentForConfig["SENSENOVA_SOCKET"]
-    ?? FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/SenseNovaU1/served.sock").path
-let outDir = home.appendingPathComponent("out")
+    ?? home.appendingPathComponent("served.sock").path
+let outDir = URL(fileURLWithPath: environmentForConfig["SENSENOVA_OUT"]
+    ?? "\(userHome)/Pictures/SenseNovaU1")
 
 func artifactDir(_ tier: String) -> URL {
     let relative: String
@@ -86,7 +91,7 @@ func artifactDir(_ tier: String) -> URL {
     default: relative = qualityArtifact
     }
     if relative.hasPrefix("/") { return URL(fileURLWithPath: relative) }
-    return home.appendingPathComponent(relative)
+    return modelsRoot.appendingPathComponent(relative)
 }
 
 // MARK: - PNG output (NCHW float32 in -1..1 -> 8-bit RGB PNG)

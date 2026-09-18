@@ -28,7 +28,8 @@ if arguments.contains("--help") || arguments.contains("-h") {
     Speaks MCP on stdin/stdout and forwards to the resident sensenova-served daemon,
     starting it on demand. No arguments are needed; MCP clients launch it directly.
 
-    Environment: SENSENOVA_HOME, SENSENOVA_SOCKET, SENSENOVA_SERVED_BIN.
+    Environment: SENSENOVA_HOME, SENSENOVA_SOCKET, SENSENOVA_SERVED_BIN,
+    SENSENOVA_MODELS, SENSENOVA_OUT.
     """)
     exit(0)
 }
@@ -36,15 +37,13 @@ if arguments.contains("--help") || arguments.contains("-h") {
 // MARK: - configuration
 
 let environment = ProcessInfo.processInfo.environment
+// $HOME first, then the passwd entry — same rule as the daemon and the CLI.
+let userHome = environment["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
 let homePath = environment["SENSENOVA_HOME"]
-    ?? FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Models/SenseNova-U1.5").path
-let socketPath = environment["SENSENOVA_SOCKET"]
-    ?? FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/SenseNovaU1/served.sock").path
+    ?? "\(userHome)/Library/Application Support/SenseNovaU1"
+let socketPath = environment["SENSENOVA_SOCKET"] ?? "\(homePath)/served.sock"
 let servedBinaryPath = environment["SENSENOVA_SERVED_BIN"]
-    ?? URL(fileURLWithPath: homePath)
-        .appendingPathComponent("bin/sensenova-served").path
+    ?? "\(environment["SENSENOVA_PREFIX"] ?? "\(userHome)/.local")/share/sensenova-u1/bin/sensenova-served"
 
 let latestRevision = "2026-07-28"
 let legacyRevision = "2025-11-25"
