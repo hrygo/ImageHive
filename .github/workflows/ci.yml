@@ -30,3 +30,37 @@ jobs:
 
       - name: Uninstaller dry run
         run: ./uninstall.sh --dry-run
+
+      # The shell entry points are the product for everyone who is not a Swift
+      # developer; a syntax error in one of them is a broken release.
+      - name: Shell syntax
+        run: |
+          for script in install.sh uninstall.sh cli/sensenova-u1 cli/lib/*.sh scripts/*.sh Tests/smoke.sh; do
+            bash -n "$script"
+          done
+
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Build the installable tarball
+        run: make release
+
+      # Installs the tarball into a private HOME with --skip-build (no Xcode, no
+      # Swift) and quarantined files, which is exactly the path a user takes.
+      # The launchd/service steps are skipped: runners have no GUI domain.
+      - name: Install from the tarball without a toolchain
+        env:
+          SENSENOVA_VERIFY_SKIP_SERVICE: "1"
+        run: bash scripts/verify_release.sh dist/*.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sensenova-u1-macos-arm64
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256

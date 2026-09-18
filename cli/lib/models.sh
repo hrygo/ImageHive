@@ -164,22 +164,46 @@ sv_download_preset() {
   count="$(printf '%s\n' "$listing" | grep -c . || true)"
   total_bytes="$(printf '%s\n' "$listing" | awk -F'\t' '{s+=$1} END{print s+0}')"
   say "$(printf '%s' "$listing" | awk -F'\t' '{printf "  %12d  %s\n", $1, $2}' | head -20)"
-  say "  ${count} files, $(python3 -c "print(f'{$total_bytes/1073741824:.1f} GiB')") from ${source}"
+  say "  ${count} files, $(sv_human_bytes "$total_bytes") from ${source}"
+  hint "  this can take a while; it is safe to interrupt and re-run — finished files are kept"
 
   mkdir -p "$dir"
   local log; log="$(mktemp)"
-  local failed=0 group=0
+  # A multi-gigabyte download that prints nothing reads as "it hung". Poll the
+  # directory from a background loop instead: it costs one `du` every few
+  # seconds and stops with the fetches below.
+  local hb="" hb_interval=10
+  [ -t 2 ] || hb_interval=60
+  if [ "${SENSENOVA_PROGRESS:-1}" != "0" ]; then
+    sv_progress_loop "$dir" "$total_bytes" "$count" "$log" "$hb_interval" &
+    hb=$!
+  fi
+
+  local failed=0 group=0 pids=()
   while IFS=$'\t' read -r size path; do
     [ -n "$path" ] || continue
     sv_fetch_one "$(sv_file_url "$repo" "$path" "$source")" "$dir/$path" "$size" "$log" &
+    pids+=($!)
     group=$((group + 1))
     if [ "$group" -ge "$jobs" ]; then
-      wait
+      # Wait for the fetches only: a bare `wait` would also wait for the
+      # progress loop, which never exits on its own.
+      if [ "${#pids[@]}" -gt 0 ]; then
+        wait "${pids[@]}" || true
+        pids=()
+      fi
       grep -q 'failed\|mismatch' "$log" 2>/dev/null && failed=1
       group=0
     fi
   done <<< "$listing"
-  wait
+  if [ "${#pids[@]}" -gt 0 ]; then
+    wait "${pids[@]}" || true
+    pids=()
+  fi
+  if [ -n "$hb" ]; then
+    kill "$hb" 2>/dev/null || true
+    wait "$hb" 2>/dev/null || true
+  fi
 
   local bad
   bad="$(grep -c 'mismatch' "$log" 2>/dev/null || true)"
@@ -191,6 +215,53 @@ sv_download_preset() {
   printf 'repo=%s\nsource=%s\nrevision=%s\n' "$repo" "$source" "master" > "$dir/.manifest"
   printf '%s\n' "$listing" | awk -F'\t' '{printf "size=%s\tpath=%s\n", $1, $2}' >> "$dir/.manifest"
   say "installed ${preset} -> ${dir} ($(sv_dir_size "$dir"))"
+}
+
+# sv_progress_loop <dir> <total-bytes> <total-files> <log> <seconds>
+# Prints one line per tick until it is killed. Never fails the installer: a
+# missing directory or an unreadable log just means this tick prints less.
+sv_progress_loop() {
+  local dir="$1" total="$2" files="$3" log="$4" tick="$5"
+  local start now done_bytes done_files elapsed
+  start="$(date +%s)"
+  while :; do
+    sleep "$tick" || return 0
+    done_bytes="$(du -sk "$dir" 2>/dev/null | awk '{print $1 * 1024}' || true)"
+    done_files="$(grep -c -e '^fetched' -e '^cached' "$log" 2>/dev/null || true)"
+    now="$(date +%s)"
+    elapsed=$((now - start))
+    [ "$elapsed" -gt 0 ] || elapsed=1
+    printf '%s  %s/%s files, %s of %s (%s%%), %s elapsed\n' \
+      "$SV_DIM" "${done_files:-0}" "$files" \
+      "$(sv_human_bytes "${done_bytes:-0}")" "$(sv_human_bytes "$total")" \
+      "$(sv_percent "${done_bytes:-0}" "$total")" "$(sv_human_seconds "$elapsed")" >&2
+  done
+}
+
+# sv_human_bytes <bytes> — "33.0 GiB"
+sv_human_bytes() {
+  local bytes="${1:-0}"
+  awk -v b="$bytes" 'BEGIN {
+    split("B KiB MiB GiB TiB", unit, " ")
+    n = 1
+    while (b >= 1024 && n < 5) { b /= 1024; n++ }
+    printf (n == 1 ? "%.0f %s" : "%.1f %s"), b, unit[n]
+  }'
+}
+
+# sv_percent <done-bytes> <total-bytes> — integer, 0 when the total is unknown
+sv_percent() {
+  local done="${1:-0}" total="${2:-0}"
+  [ "${total:-0}" -gt 0 ] 2>/dev/null || { printf '?\n'; return 0; }
+  printf '%s\n' "$((done * 100 / total))"
+}
+
+# sv_human_seconds <seconds> — "4m30s"
+sv_human_seconds() {
+  local s="${1:-0}"
+  if [ "$s" -ge 3600 ]; then printf '%dh%02dm\n' "$((s / 3600))" "$(((s % 3600) / 60))"
+  elif [ "$s" -ge 60 ]; then printf '%dm%02ds\n' "$((s / 60))" "$((s % 60))"
+  else printf '%ds\n' "$s"; fi
 }
 
 # sv_verify_preset <preset> — sizes on disk vs what the manifest recorded

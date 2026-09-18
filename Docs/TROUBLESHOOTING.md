@@ -24,11 +24,37 @@ Xcode 27 ships the Metal toolchain as a separate component:
 xcodebuild -downloadComponent MetalToolchain
 ```
 
+**`./install.sh` does nothing, or the terminal waits forever on the first
+image.**
+The files came from a download, so macOS marked them quarantined and Gatekeeper is
+holding the process until you answer a dialog. Run the installer through the
+shell instead — `bash install.sh` — which the quarantine does not gate; the
+installer then clears the flag from the binaries it installs. Details and the
+measurements: [DISTRIBUTING.md](DISTRIBUTING.md#why-bash-installsh-and-not-installsh).
+
+**`python3 is required and was not found.`**
+Unlike most of this project, python3 is not optional: the artifact downloader
+parses the ModelScope/Hugging Face listings with it, the client wiring edits
+JSON/JSONC configs, and the CLI reads `config.json` with it. Install it with
+`xcode-select --install` (macOS ships it with the Command Line Tools, ~1.5 GB) or
+`brew install python`, then re-run the installer — it picks up where it stopped.
+
+**The download looks stuck.**
+It prints a heartbeat every few seconds once it starts fetching (`3/12 files,
+8.2 GiB of 33.0 GiB (24%), 4m10s elapsed`). If a file stalls, stop it with
+Ctrl-C and re-run `sensenova-u1 models pull <preset>`: finished files are
+verified by size and skipped, and partial files resume (`curl -C -`).
+
 **`no model artifact installed: looked for …` as an error from a tool call.**
 Neither tier's artifact is on disk, so there is nothing to serve the request
 from. `sensenova-u1 models` shows what is there; `sensenova-u1 models pull
 fast-4bit` (11 GiB) or `quality-bf16` (33 GiB) installs one. One artifact is
 enough — see [MODELS.md](MODELS.md#one-artifact-is-enough).
+
+**`sensenova-u1: command not found` after installing.**
+`~/.local/bin` is not on the default macOS `PATH`. Either call it by full path
+(`~/.local/bin/sensenova-u1 doctor`) or add `export PATH="$HOME/.local/bin:$PATH"`
+to `~/.zprofile`. The installer prints this when it applies.
 
 **The reply says `asked for fast, not installed` (or `asked for quality`).**
 That is the single-artifact fallback working: this machine installed only the

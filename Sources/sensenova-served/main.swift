@@ -475,6 +475,15 @@ func withSockaddr(_ path: String, _ body: (UnsafePointer<sockaddr>) -> Int32) ->
 }
 
 func openListener(_ path: String) -> Int32? {
+    // sun_path is 104 bytes on macOS, including the terminating NUL. This used to
+    // be truncated silently with strncpy, which produced a daemon listening on a
+    // name nobody else could compute — or, after a restart, a bare exit 3 with
+    // nothing in the log. Refusing up front turns a mystery into an instruction.
+    guard path.utf8.count < 104 else {
+        log("socket path is too long: \(path.utf8.count) bytes, macOS allows 103 (sun_path)")
+        log("set SENSENOVA_SOCKET to a shorter path, or move SENSENOVA_HOME somewhere shorter")
+        return nil
+    }
     if FileManager.default.fileExists(atPath: path) {
         let probe = socket(AF_UNIX, SOCK_STREAM, 0)
         let connected = withSockaddr(path) { connect(probe, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
@@ -486,9 +495,13 @@ func openListener(_ path: String) -> Int32? {
         unlink(path)
     }
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    guard fd >= 0 else { return nil }
+    guard fd >= 0 else {
+        log("socket() failed: \(String(cString: strerror(errno)))")
+        return nil
+    }
     let bound = withSockaddr(path) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
     guard bound == 0, listen(fd, 16) == 0 else {
+        log("could not bind \(path): \(String(cString: strerror(errno)))")
         close(fd)
         return nil
     }

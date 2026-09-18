@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for the sensenova-u1 CLI and the installers. Sourced, not run.
 
-SV_VERSION="0.2.1"
+SV_VERSION="0.3.0"
 # Layout (see Docs/LAYOUT.md). macOS conventions, every path overridable:
 #   app data  ~/Library/Application Support/SenseNovaU1  (config, socket, weights)
 #   logs      ~/Library/Logs/SenseNovaU1
@@ -233,29 +233,42 @@ sv_service_loaded() {
 }
 
 sv_service_start() {
-  local domain="gui/$(id -u)" label err tries=0
+  local domain="gui/$(id -u)" label err tries=0 waited=0
   label="$(sv_label)"
   err="$(mktemp)"
-  # `launchctl bootstrap` can report success while the job is not in the domain
-  # yet (it is discarded if a previous bootout has not finished settling), so
-  # trust `launchctl print` over the exit status and retry the pair as a unit.
-  while :; do
-    tries=$((tries + 1))
-    if ! sv_service_loaded; then
-      launchctl bootstrap "$domain" "$(sv_plist)" 2>"$err" || true
-      sleep 0.5
-    fi
-    if sv_service_loaded && launchctl kickstart -k "$domain/$label" 2>"$err"; then
-      rm -f "$err"
-      return 0
-    fi
-    if [ "$tries" -ge 10 ]; then
-      warn "$(cat "$err")"
-      rm -f "$err"
-      die "could not start $label — try: launchctl bootstrap $domain $(sv_plist)"
-    fi
-    sleep 0.5
+  if sv_service_loaded; then
+    # Already in the domain: ask launchd for a restart, which is what `-k` means.
+    launchctl kickstart -k "$domain/$label" 2>"$err" || true
+  else
+    # A fresh `bootstrap` starts the job by itself (RunAtLoad). Sending
+    # `kickstart -k` straight after it kills the instance launchd just created and
+    # races the replacement against the corpse — measured as `runs = 2, last exit
+    # code = 3` with nobody listening, which then fails the installer's smoke
+    # test on a machine that is perfectly fine. So: bootstrap and wait.
+    launchctl bootstrap "$domain" "$(sv_plist)" 2>"$err" || true
+    # `bootstrap` can report success while the job is not in the domain yet (it is
+    # discarded when a previous bootout has not finished settling), so trust
+    # `launchctl print` over the exit status.
+    while ! sv_service_loaded; do
+      tries=$((tries + 1))
+      if [ "$tries" -ge 20 ]; then
+        warn "$(cat "$err")"
+        rm -f "$err"
+        die "could not load $label — try: launchctl bootstrap $domain $(sv_plist)"
+      fi
+      sleep 0.25
+    done
+  fi
+  rm -f "$err"
+  # Leave the caller with a socket that exists, so the next command (a status
+  # call, the installer's smoke test) never races the start.
+  while [ "$waited" -lt 160 ]; do
+    if [ -S "$(sv_socket)" ]; then return 0; fi
+    waited=$((waited + 1))
+    sleep 0.25
   done
+  warn "the job is loaded but $(sv_socket) did not appear within 40s — check $(sv_log)"
+  return 0
 }
 
 # bootout returns before the job is actually gone, so wait for the domain to

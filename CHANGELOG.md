@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.3.0 — 2026-09-18
+
+**Handing this to someone else, and letting a non-developer use it.** The
+release archive was not installable, and a downloaded copy could hang on the
+first launch; both are fixed and verified by `make release-verify`.
+
+* `make release` now builds a complete, self-contained archive:
+  `install.sh`, `uninstall.sh`, `cli/`, `Docs/`, `README`/`LICENSE`/`NOTICE`/
+  `CHANGELOG`, `BUILD-INFO.txt`, `SHA256SUMS` and `prebuilt/` (both binaries plus
+  the MLX bundles). `install.sh` sources `cli/lib/*.sh`, so the previous tarball —
+  `prebuilt/` only — could not install anything.
+* The archive is named after the project version in `cli/lib/common.sh`
+  (0.3.0 here) instead of the upstream git tag, which used to make a fork build
+  look like an upstream release; the tag is recorded in `BUILD-INFO.txt`.
+* **Quarantine is handled.** Gatekeeper refuses to run a quarantined Mach-O: the
+  process blocks in `syspolicyd` on a dialog a terminal install never shows, and
+  BSD `install`/`cp` propagate the flag to the installed copies, so every MCP
+  client launch would hang. `install.sh` now clears `com.apple.quarantine` from
+  the files it installs and says so; `bash install.sh` works on a quarantined
+  copy because scripts read by a shell are not gated. None of this needs a
+  Developer ID or notarisation — the measurements are in
+  [Docs/DISTRIBUTING.md](Docs/DISTRIBUTING.md).
+* `python3` is now a checked requirement with an actionable message instead of a
+  warning followed by a failure twenty minutes into a download.
+* Model downloads print a heartbeat — file count, bytes, percent, elapsed — so a
+  33 GiB pull no longer looks like a hang. The announcement also says the
+  download is resumable. (`SENSENOVA_PROGRESS=0` silences it.)
+* The installer's closing note points out when `~/.local/bin` is not on `PATH`,
+  with the exact line to add, and tells the user to restart their agent.
+* `scripts/verify_release.sh` (+ `make release-verify`): verifies the archive
+  against its `.sha256`, quarantines the extracted copy, installs it into a
+  private HOME with `--skip-build` (no Xcode, no Swift), and asserts the binaries,
+  bundles and command are in place *and unquarantined*, that the sandbox service
+  answers, and that `doctor` reports the model-less state of the sandbox.
+  `SENSENOVA_VERIFY_SKIP_SERVICE=1` stops before the launchd steps for headless CI.
+* `sensenova-mcp` writes its daemon log under `$HOME` like everything else, so a
+  sandboxed install no longer appends to the real user's log.
+* CI: a `release` job builds the archive and installs it from the tarball, plus a
+  shell-syntax pass over every script (`bash -n`).
+* Docs: new [Docs/DISTRIBUTING.md](Docs/DISTRIBUTING.md) (what to hand over, what
+  the recipient does, offline installs, pre-flight checklist);
+  [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md) covers the quarantine hang,
+  the python3 requirement, a stalled-looking download and the `PATH` gap; the
+  README gained an Xcode-free quick start.
+
 ## 0.2.1 — 2026-09-18
 
 **One artifact is enough.** `tier` is a preference, not a requirement — the docs

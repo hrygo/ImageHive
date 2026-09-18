@@ -159,7 +159,9 @@ final class DaemonClient {
         process.environment = env
         // The daemon outlives this front end, so its log lines go to a file
         // rather than to a stderr pipe that will be closed when we exit.
-        let logDirectory = FileManager.default.homeDirectoryForCurrentUser
+        // $HOME first, like every other path here: a sandboxed or overridden HOME
+        // must not write its daemon log into the real user's log directory.
+        let logDirectory = URL(fileURLWithPath: userHome)
             .appendingPathComponent("Library/Logs/SenseNovaU1")
         try? FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
         let logPath = logDirectory.appendingPathComponent("served.log").path
@@ -183,6 +185,15 @@ final class DaemonClient {
     /// Connect, starting the daemon if needed. The daemon binds the socket only
     /// after it is ready to accept, so a bounded poll is the whole handshake.
     private func connectToDaemon() throws {
+        // sun_path holds 103 bytes plus the NUL; a longer path must be refused
+        // here rather than truncated, or the front end would connect somewhere
+        // else entirely and report "daemon unreachable" forever.
+        guard socketPath.utf8.count < 104 else {
+            throw DaemonError(description: """
+                socket path is too long: \(socketPath.utf8.count) bytes, macOS allows 103.
+                Point SENSENOVA_SOCKET (or SENSENOVA_HOME) at something shorter.
+                """)
+        }
         if connectOnce() { return }
         spawnServed()
         let deadline = Date().addingTimeInterval(30)

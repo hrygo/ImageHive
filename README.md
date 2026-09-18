@@ -5,16 +5,30 @@ own Mac — served to AI agents over MCP. No API key, no per-image cost, no uplo
 the model runs locally on Apple silicon through MLX, and every agent on the
 machine shares **one** resident copy of the weights.
 
+## Quick start
+
+**From a release tarball** — no Xcode, no compiler, nothing to build:
+
 ```bash
-git clone https://github.com/<you>/SenseNovaU1-Service.git
-cd SenseNovaU1-Service
+shasum -a 256 -c sensenova-u1-0.3.0-macos-arm64.tar.gz.sha256   # check the download
+tar -xzf sensenova-u1-0.3.0-macos-arm64.tar.gz
+cd sensenova-u1-0.3.0-macos-arm64
+bash install.sh          # `bash`, not `./install.sh` — see Docs/DISTRIBUTING.md
+```
+
+**From source** — for working on the service itself; needs Xcode 27 with the
+Metal toolchain (see Requirements):
+
+```bash
+git clone <this repository> && cd SenseNovaU1-Service
 ./install.sh
 ```
 
-The installer checks the machine, downloads a ready-to-run model (~11 GiB by
-default, ModelScope first — no proxy needed in China), builds, installs a
-background service, wires the MCP clients it finds, and runs a smoke test.
-Then just ask your agent for a picture.
+Either way the installer checks the machine, downloads a ready-to-run model
+(~11 GiB by default, ModelScope first — no proxy needed in China), installs a
+background service, wires the MCP clients it finds, and runs a smoke test. Then
+restart your agent and ask it for a picture. Handing this to someone else, or
+cutting a release: [Docs/DISTRIBUTING.md](Docs/DISTRIBUTING.md).
 
 ## Where it installs
 
@@ -53,10 +67,13 @@ reasoning, and the exact rules each choice follows, is in
 | Memory | 18 GB minimum for the 4-bit tier (peaks ~15 GB); 48 GB+ to comfortably run the bf16 tier |
 | macOS | 26 or newer (the Swift package targets macOS 26) |
 | Disk | ~16 GiB for a fast-tier install, ~48 GiB with both tiers, plus a one-time ~2 GB build tree |
-| Toolchain | Xcode 27 (full app, not just the Command Line Tools) — the build needs the Metal toolchain, which Xcode 27 ships as a separate download: `xcodebuild -downloadComponent MetalToolchain` |
+| python3 | Required. macOS ships it with the Command Line Tools (`xcode-select --install`, ~1.5 GB) or via `brew install python`. The installer stops early and says so if it is missing. |
+| Toolchain | Only when building from source: Xcode 27 (full app, not just the Command Line Tools) — the build needs the Metal toolchain, which Xcode 27 ships as a separate download: `xcodebuild -downloadComponent MetalToolchain`. A release tarball needs none of this. |
 | Time | 10–40 min the first time, dominated by the model download and the first build |
 
 Already have the model? `./install.sh --model none --skip-build` skips both.
+Downloads print progress and resume: interrupting a 33 GiB pull and re-running it
+costs only the missing files.
 
 ## Which model tier
 

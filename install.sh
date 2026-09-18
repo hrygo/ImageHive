@@ -5,6 +5,7 @@
 #   ./install.sh --model both       # also pull the bf16 quality tier (~33 GiB)
 #   ./install.sh --model none       # use artifacts you already have
 #   ./install.sh --dry-run          # print every action, change nothing
+#   bash install.sh ...             # works even when the copy is quarantined
 #
 # Where things go (Docs/LAYOUT.md; every path is overridable):
 #   ~/Library/Application Support/SenseNovaU1/  config.json, service.conf, served.sock, models/
@@ -84,6 +85,33 @@ write_file() { # <path> ; content on stdin
   cat > "$path"
 }
 
+# Files that arrive from a download — a release tarball, a browser, AirDrop —
+# carry com.apple.quarantine. Gatekeeper then refuses to run the Mach-O binaries
+# this installer puts in place: the process blocks on a consent dialog that a
+# terminal install never shows (measured: a quarantined sensenova-mcp hangs in
+# `syspolicyd` until the user answers), and BSD `install`/`cp` propagate the flag
+# to the copies. Shell scripts read by bash are not gated, which is why
+# `bash install.sh` still works on a freshly downloaded copy.
+#
+# Clearing the flag from the files this installer owns is the whole fix; it needs
+# no signing identity and no notarisation. Only our own install targets are
+# touched, never the user's other files.
+dequarantine() { # <path ...> ; prints the paths that were actually quarantined
+  [ "$DRY_RUN" = "1" ] && return 0
+  sv_have xattr || return 0
+  local target found=0
+  for target in "$@"; do
+    [ -e "$target" ] || continue
+    if xattr -p com.apple.quarantine "$target" >/dev/null 2>&1; then
+      xattr -dr com.apple.quarantine "$target" 2>/dev/null || true
+      say "  cleared the download quarantine flag on $target"
+      found=1
+    fi
+  done
+  [ "$found" = "1" ] || return 0
+  hint "     (a quarantined binary would hang on a Gatekeeper prompt; Docs/DISTRIBUTING.md)"
+}
+
 # ---------------------------------------------------------------- preflight --
 
 preflight() {
@@ -112,7 +140,15 @@ preflight() {
     hint "swift $(swift --version 2>/dev/null | head -1 | awk '{print $4}'), metal toolchain present"
   fi
 
-  sv_have python3 || warn "python3 not found — config edits for some clients will be skipped (xcode-select --install)"
+  # python3 is not a nicety: the artifact downloader parses the ModelScope /
+  # Hugging Face listings with it, the client wiring edits JSON/JSONC configs with
+  # it, and the CLI reads config.json with it. Saying so here beats dying twenty
+  # minutes into a 33 GiB download.
+  if ! sv_have python3; then
+    die "python3 is required and was not found.
+       macOS ships python3 with the Command Line Tools:  xcode-select --install
+       (about 1.5 GB, one time), or with Homebrew:        brew install python"
+  fi
   sv_have curl || die "curl not found"
 
   local need_gb=6 avail_gb
@@ -297,12 +333,13 @@ install_binaries() {
   run install -m 0755 "$out/sensenova-mcp" "$bin/sensenova-mcp"
   if [ "$DRY_RUN" = "0" ]; then
     local bundle
-    for bundle in "$out"/*.bundle; do
-      [ -e "$bundle" ] || continue
-      rm -rf "$bin/$(basename "$bundle")"
-      cp -R "$bundle" "$bin/"
-    done
+  for bundle in "$out"/*.bundle; do
+    [ -e "$bundle" ] || continue
+    rm -rf "$bin/$(basename "$bundle")"
+    cp -R "$bundle" "$bin/"
+  done
   fi
+  dequarantine "$bin/sensenova-served" "$bin/sensenova-mcp" "$bin"/*.bundle
   hint "binaries + MLX resource bundles -> $bin"
 
   # The management CLI keeps its helper scripts next to it in share/.
@@ -311,6 +348,7 @@ install_binaries() {
   run cp -R "$REPO_DIR/cli/." "$share/"
   run chmod +x "$share/sensenova-u1" "$share"/lib/*.py
   run ln -sf "$share/sensenova-u1" "$(sv_cli_path)"
+  dequarantine "$share" "$(sv_cli_path)"
   hint "command installed: $(sv_cli_path)"
 }
 
@@ -490,9 +528,20 @@ summary() {
   say "  sensenova-u1 doctor        check every moving part"
   say "  sensenova-u1 models        see which artifacts are installed"
   say "  sensenova-u1 clients list  see which clients are wired"
+  # The command is installed into ~/.local/bin, which is not on PATH by default
+  # on macOS. Say so here rather than letting the next command fail with
+  # "command not found".
+  case ":$PATH:" in
+    *":$(sv_prefix)/bin:"*) ;;
+    *) say ""
+       say "Note: $(sv_prefix)/bin is not on your PATH, so type the whole path:"
+       say "      $(sv_cli_path) doctor"
+       say "      or add this to ~/.zprofile:  export PATH=\"$(sv_prefix)/bin:\$PATH\"" ;;
+  esac
   say ""
-  say "Then ask your agent for an image; the first call loads the weights (~5s),"
-  say "and they are released again after 10 minutes idle."
+  say "Then restart your agent (Codex, Claude, opencode, QwenPaw, …) so it picks"
+  say "up the new MCP entry, and ask it for an image. The first call loads the"
+  say "weights (~5 s); they are released again after 10 minutes idle."
 }
 
 main() {
