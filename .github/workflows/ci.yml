@@ -13,6 +13,11 @@ name: ci
 on:
   push:
     branches: [main]
+    # Tags have to be listed separately: with only `branches:` a `v1.2.3` push
+    # matches nothing and the workflow never starts, which silently makes the
+    # "cut a release by pushing a tag" path below a no-op (measured: pushing
+    # v0.5.0 created zero workflow runs).
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
