@@ -19,6 +19,11 @@
   `service.conf`.
 * Both executables now honour `$HOME` before the passwd entry, so a sandboxed
   `HOME` no longer reaches back into the real user's app home.
+* `clients add opencode` rewrites its entry instead of appending a second one.
+  Duplicate `"sensenova"` keys are not cosmetic: JSON keeps the **last** one, so
+  a stale or hand-written entry pointing at an old path silently won over the
+  one just written — the installer said "wired" while the client was still
+  starting the previous binary. `add` now removes every copy first.
 * New documentation: [AGENTS.md](AGENTS.md) for agents changing this repo and
   [Docs/LAYOUT.md](Docs/LAYOUT.md) for the layout decision.
 
