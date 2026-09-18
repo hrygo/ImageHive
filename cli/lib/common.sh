@@ -278,15 +278,57 @@ sv_service_start() {
 # bootout returns before the job is actually gone, so wait for the domain to
 # settle; bootstrapping into a domain that is still tearing down is what makes
 # the restart below flaky in the first place.
+#
+# bootout only ends the process launchd started. The daemon is *normally* started
+# by an MCP front end (`spawnServed`), and that one outlives every front end, so
+# it keeps the socket while the job fails to bind (exit 3) — measured 2026-09-18:
+# after a reinstall, `options` answered `unknown cmd` because the process serving
+# the socket was the previous build, and nothing in the output said so.
 sv_service_stop() {
   local domain="gui/$(id -u)" label tries=0
   label="$(sv_label)"
-  sv_service_loaded || return 0
-  launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
-  while sv_service_loaded && [ "$tries" -lt 40 ]; do
-    sleep 0.25
-    tries=$((tries + 1))
+  if sv_service_loaded; then
+    launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+    while sv_service_loaded && [ "$tries" -lt 40 ]; do
+      sleep 0.25
+      tries=$((tries + 1))
+    done
+  fi
+  sv_service_reap_stray
+  return 0
+}
+
+# PIDs that hold the daemon socket open. Asking the OS rather than the daemon:
+# a build older than the `pid` field cannot report one, and that is exactly the
+# case that needs reaping.
+sv_socket_owner_pids() {
+  local sock pid
+  sock="$(sv_socket)"
+  [ -S "$sock" ] || return 0
+  for pid in $(pgrep -f 'sensenova-served' 2>/dev/null || true); do
+    lsof -p "$pid" 2>/dev/null | grep -qF "$sock" && printf '%s\n' "$pid"
   done
+  return 0
+}
+
+# Ends whatever is serving the socket but is not the current launchd job, so that
+# `stop`, `restart` and a reinstall actually hand the socket to the new binary.
+# Only processes whose command line names sensenova-served are signalled.
+sv_service_reap_stray() {
+  local pid cmd tries=0
+  [ -n "$(sv_socket_owner_pids)" ] || return 0
+  for pid in $(sv_socket_owner_pids); do
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    case "$cmd" in
+      *sensenova-served*) kill "$pid" 2>/dev/null || true ;;
+      *) warn "pid $pid holds $(sv_socket) but is not sensenova-served — leaving it alone" ;;
+    esac
+  done
+  while [ "$tries" -lt 60 ]; do
+    [ -z "$(sv_socket_owner_pids)" ] || { sleep 0.25; tries=$((tries + 1)); continue; }
+    return 0
+  done
+  warn "a daemon is still serving $(sv_socket) after SIGTERM: $(sv_socket_owner_pids | tr '\n' ' ')"
   return 0
 }
 
@@ -308,6 +350,11 @@ sv_unload() {
 
 sv_peak_mb() { sv_status 2>/dev/null | awk -F= '$1=="last_peak_mb"{print $2}'; }
 sv_resident() { sv_status 2>/dev/null | awk -F= '$1=="resident_tier"{print $2}'; }
+# Which build is answering, and which process. Empty on a daemon older than the
+# `pid` / `project_version` fields, which is itself the signal that the socket is
+# held by a binary from before the last install.
+sv_daemon_version() { sv_status 2>/dev/null | awk -F= '$1=="project_version"{print $2}'; }
+sv_daemon_pid()     { sv_status 2>/dev/null | awk -F= '$1=="pid"{print $2}'; }
 
 # --- misc --------------------------------------------------------------------
 

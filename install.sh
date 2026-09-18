@@ -460,6 +460,18 @@ PLIST
   sv_service_stop >/dev/null 2>&1 || true
   sv_service_start
   hint "service loaded; the first request starts a daemon if none is serving yet"
+
+  # Assert that the daemon *answering* is this build. A process started by an MCP
+  # front end before this install keeps the socket (the launched job then exits 3
+  # without binding), so the install can look perfect while every answer still comes
+  # from the previous binary. `sv_service_stop` reaps it, but say so if it survived.
+  local status_out serving
+  status_out="$(sv_status 2>/dev/null || true)"
+  if [ -n "$status_out" ]; then
+    serving="$(printf '%s\n' "$status_out" | awk -F= '$1=="project_version"{print $2}')"
+    [ "$serving" = "$SV_VERSION" ] \
+      || warn "the daemon answering on $(sv_socket) is ${serving:-an older build}, not $SV_VERSION — run: sensenova-u1 restart"
+  fi
 }
 
 wire_clients() {

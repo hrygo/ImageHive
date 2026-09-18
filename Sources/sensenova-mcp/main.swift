@@ -307,6 +307,12 @@ func runManagementSwitch(_ flag: String) {
         print("queue_depth=\(queued)")
         print("ttl_seconds=\(Int(ttl))")
         print("last_peak_mb=\(peak)")
+        // Which build is answering, and which process. A daemon started by an older
+        // install (or by hand) keeps the socket, so after an upgrade the answers can
+        // still come from the previous binary; this is what makes that visible.
+        print("pid=\(status["pid"] as? Int ?? 0)")
+        print("project_version=\((status["project_version"] as? String) ?? "unknown")")
+        print("protocol=\(status["protocol"] as? Int ?? 0)")
         if let when = status["last_request_at"] as? String { print("last_request_at=\(when)") }
         // Live progress, so `sensenova-u1 status` is useful while it runs rather than
         // just saying inflight=1.

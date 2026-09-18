@@ -101,6 +101,9 @@ fi
 echo "== the service the CLI talks to"
 "$served" >/dev/null 2>"$work/daemon.log" &
 daemon_pid=$!
+# Detach from this shell's job table: bash otherwise prints its own
+# "Terminated: 15" line when `stop` kills it. The pid is still ours to kill.
+disown "$daemon_pid" 2>/dev/null || true
 for _ in $(seq 1 60); do [ -S "$SENSENOVA_SOCKET" ] && break; sleep 0.25; done
 [ -S "$SENSENOVA_SOCKET" ] || fail "the daemon did not bind $SENSENOVA_SOCKET"
 
@@ -155,5 +158,41 @@ echo "== a request the daemon refuses does not take the service down"
 "${cli[@]}" generate --prompt x --width 1000 --height 512 >/dev/null 2>&1 || true
 "${cli[@]}" status >/dev/null || fail "the service stopped answering after a refused request"
 ok "still answering"
+
+echo "== status names the process and the build that answered"
+serving="$("${cli[@]}" status)"
+for field in "pid=" "project_version=" "protocol="; do
+  case "$serving" in
+    *"$field"*) ;;
+    *) fail "status does not report $field — which build is answering is not visible: $serving" ;;
+  esac
+done
+ok "$(printf '%s\n' "$serving" | grep -E '(pid|project_version|protocol)=' | tr '\n' ' ')"
+
+echo "== stop ends a daemon that launchd never started"
+# The daemon in this test was started by hand, which is exactly how the normal
+# install runs it (an MCP front end forks it) — and why a plain `bootout` +
+# `bootstrap` used to leave the old binary serving the socket after an upgrade.
+"${cli[@]}" stop >/dev/null 2>&1 || fail "stop exited non-zero"
+for _ in $(seq 1 40); do
+  kill -0 "$daemon_pid" 2>/dev/null || break
+  sleep 0.25
+done
+kill -0 "$daemon_pid" 2>/dev/null && fail "stop left the daemon running (pid $daemon_pid)"
+# Reap it here too: an unwatched background job makes bash print its own
+# "Terminated: 15" line into the middle of the test output.
+wait "$daemon_pid" 2>/dev/null || true
+daemon_pid=""
+# Ask the library the CLI itself uses, so the assertion is about the same
+# definition of "still owned" that `stop` reaps by.
+socket_owners() {
+  bash -c '. "$1/cli/lib/common.sh"; sv_socket_owner_pids' _ "$REPO_DIR" 2>/dev/null || true
+}
+for _ in $(seq 1 20); do
+  [ -z "$(socket_owners)" ] && break
+  sleep 0.25
+done
+[ -z "$(socket_owners)" ] || fail "the socket is still owned after stop: $(socket_owners) (pid $daemon_pid)"
+ok "the socket was handed back"
 
 echo "PASS (cli)"

@@ -548,6 +548,11 @@ actor Core {
             "last_peak_mb": lastPeakMB,
             "protocol": protocolVersion,
             "project_version": projectVersion,
+            // Which process is answering. The daemon is normally started by an MCP
+            // front end rather than by launchd, so a reinstall can leave an older
+            // binary serving the socket while the launchd job exits 3 without ever
+            // binding; without the pid there is no way to tell from the outside.
+            "pid": Int(ProcessInfo.processInfo.processIdentifier),
         ]
         if let d = lastUseAt { out["last_request_at"] = ISO8601DateFormatter().string(from: d) }
         if let d = loadedAt { out["loaded_at"] = ISO8601DateFormatter().string(from: d) }
