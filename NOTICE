@@ -6,10 +6,16 @@ resident local image service on top of it. Third-party material it builds on:
 
 1. sensenova-u1-swift — https://github.com/xocialize/sensenova-u1-swift
    Copyright (c) 2026 Xocialize. MIT License (see LICENSE).
-   The upstream sources, tests, Docs/ and Package.resolved are unchanged; the
-   additions of this fork are the two executables under Sources/sensenova-served
-   and Sources/sensenova-mcp, the installer/CLI under cli/, install.sh,
-   uninstall.sh and the documentation.
+   This fork is based on upstream commit 96a0c9b ("publish the pose tiers to
+   mlx-community, verified on the downloaded bytes"), the tip of upstream's main
+   branch at the time of forking. Upstream's sources, tests, Package.resolved and
+   its own Docs/ (publish/, receipts/) are unchanged.
+   The additions of this fork, all under the same MIT terms, are: the resident
+   service and MCP front end (Sources/sensenova-served, Sources/sensenova-mcp),
+   the management CLI and installers (cli/, install.sh, uninstall.sh), the build
+   and release plumbing (Makefile, scripts/, .github/), and its documentation
+   (README, README.zh-CN, CHANGELOG, NOTICE, Docs/CLIENTS, Docs/LAYOUT,
+   Docs/MODELS, Docs/TROUBLESHOOTING, Docs/DISTRIBUTING + the zh-CN pair).
 
 2. SenseNova-U1.5-8B-MoT model weights — https://huggingface.co/sensenova/SenseNova-U1.5-8B-MoT
    Copyright SenseTime. Apache License 2.0. The weights are NOT distributed with

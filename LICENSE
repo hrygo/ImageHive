@@ -19,3 +19,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+This repository is a fork of sensenova-u1-swift (see NOTICE). The files added by
+the fork — Sources/sensenova-served, Sources/sensenova-mcp, cli/, install.sh,
+uninstall.sh, Makefile, scripts/, .github/ and the documentation — are released
+under the same MIT terms as above, with the following copyright:
+
+Copyright (c) 2026 hrygo
