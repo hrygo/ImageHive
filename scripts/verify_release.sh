@@ -117,6 +117,22 @@ case "$status" in *available_tiers=*) ok "$(printf '%s\n' "$status" | awk -F= '/
   *) fail "status did not report available_tiers:
 $status" ;;
 esac
+# The daemon answering must be the build that was just installed, and it must be the
+# only one: a front end that resolves the wrong home starts a second daemon on the
+# default socket, which is a second copy of the weights. Both regressions were real
+# (measured 2026-09-18) before the layout was exported and the socket was unlinked on
+# SIGTERM.
+expected_version="$(sed -n 's/^SV_VERSION="\(.*\)"/\1/p' "$src/cli/lib/common.sh")"
+case "$status" in
+  *"project_version=$expected_version"*) ok "the daemon answering is $expected_version" ;;
+  *) fail "the daemon answering is not the installed build ($expected_version):
+$status" ;;
+esac
+own_home="$(printf '%s\n' "$status" | awk '/^[[:space:]]*home:/{print $2}')"
+case "$own_home" in
+  "$sandbox_home"/*) ok "the sandbox is self-contained ($own_home)" ;;
+  *) fail "the sandbox service is using $own_home, not $sandbox_home" ;;
+esac
 
 echo "== 6. doctor sees the real state of a model-less sandbox"
 doctor_rc=0
