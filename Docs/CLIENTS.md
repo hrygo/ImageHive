@@ -4,22 +4,22 @@ Every client points at the same binary and the same two environment variables,
 so one install serves all of them:
 
 ```
-command: ~/.local/share/sensenova-u1/bin/sensenova-mcp
-env:     SENSENOVA_HOME=<app home>                 # ~/Library/Application Support/SenseNovaU1
-         SENSENOVA_SERVED_BIN=<bin dir>/sensenova-served
+command: ~/.local/share/imagehive/bin/imagehive-mcp
+env:     IMAGEHIVE_HOME=<app home>                 # ~/Library/Application Support/ImageHive
+         IMAGEHIVE_DAEMON_BIN=<bin dir>/imagehived
          # only when they differ from what the app home implies:
-         # SENSENOVA_MODELS=<models root>   SENSENOVA_OUT=<images directory>
+         # IMAGEHIVE_MODELS=<models root>   IMAGEHIVE_OUT=<images directory>
 ```
 
-`sensenova-u1 clients snippet` prints this block with this machine's real paths.
+`imagehive clients snippet` prints this block with this machine's real paths.
 
 `install.sh` wires the clients it detects. Later:
 
 ```bash
-sensenova-u1 clients list
-sensenova-u1 clients add codex|claude|opencode|qwenpaw|claude-desktop|cursor|auto
-sensenova-u1 clients remove codex
-sensenova-u1 clients snippet        # for anything not listed here
+imagehive clients list
+imagehive clients add codex|claude|opencode|qwenpaw|claude-desktop|cursor|auto
+imagehive clients remove codex
+imagehive clients snippet        # for anything not listed here
 ```
 
 ## How each client is wired
@@ -29,9 +29,9 @@ sensenova-u1 clients snippet        # for anything not listed here
 | Codex | `codex` on PATH | `codex mcp add` | writes `~/.codex/config.toml`; `codex mcp list` shows it |
 | Claude Code | `claude` on PATH | `claude mcp add -s user` | user scope, so it applies to every project |
 | opencode | `opencode` on PATH or existing config | marker block in `~/.config/opencode/opencode.jsonc` | see below |
-| QwenPaw | `~/.qwenpaw/config.json` | JSON merge at `mcp.clients.sensenova_image` | `qwenpaw daemon reload-config` applies it |
-| Claude Desktop | `~/Library/Application Support/Claude` | JSON merge at `mcpServers.sensenova` | restart the app |
-| Cursor | `~/.cursor` | JSON merge at `mcpServers.sensenova` | reload the window |
+| QwenPaw | `~/.qwenpaw/config.json` | JSON merge at `mcp.clients.imagehive_image` | `qwenpaw daemon reload-config` applies it |
+| Claude Desktop | `~/Library/Application Support/Claude` | JSON merge at `mcpServers.imagehive` | restart the app |
+| Cursor | `~/.cursor` | JSON merge at `mcpServers.imagehive` | reload the window |
 | anything else | — | `clients snippet` | paste into its MCP config |
 
 ## opencode and comments
@@ -42,9 +42,9 @@ delete every comment in the file. The block is fenced:
 
 ```jsonc
   "mcp": {
-    // sensenova-u1:begin (managed by `sensenova-u1 clients`)
-    "sensenova": { ... },
-    // sensenova-u1:end
+    // imagehive:begin (managed by `imagehive clients`)
+    "imagehive": { ... },
+    // imagehive:end
     "existing-server": { ... }
   },
 ```
@@ -61,21 +61,21 @@ before expecting the tools to show up.
 Verify from the client side:
 
 ```bash
-codex mcp list | grep sensenova
-opencode mcp list | grep sensenova
-claude mcp list | grep sensenova
+codex mcp list | grep imagehive
+opencode mcp list | grep imagehive
+claude mcp list | grep imagehive
 ```
 
 and from the service side:
 
 ```bash
-sensenova-u1 status
+imagehive status
 ```
 
 ## Project-scoped clients
 
 VS Code (`.vscode/mcp.json`), Zed and similar tools want a per-project config.
-Use `sensenova-u1 clients snippet` and drop the block into the project file —
+Use `imagehive clients snippet` and drop the block into the project file —
 the installer deliberately does not touch files inside your repositories.
 
 ## What the tools take
@@ -83,7 +83,7 @@ the installer deliberately does not touch files inside your repositories.
 Ask the service instead of guessing: **`model_options`** returns the whole contract
 without loading the weights — accepted sizes, the steps/cfg ranges and their per-tier
 defaults, the seed rule, which prompt arguments apply to which tool, where the
-metadata lands, and which tiers this machine has. `sensenova-u1 options` prints the
+metadata lands, and which tiers this machine has. `imagehive options` prints the
 same thing in a terminal.
 
 | Tool | Arguments that matter |

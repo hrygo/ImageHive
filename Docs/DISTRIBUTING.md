@@ -1,7 +1,8 @@
 # Distributing this service
 
-> [中文版](DISTRIBUTING.zh-CN.md) — the recipient-facing guide is also available
-> in Chinese ([README.zh-CN.md](../README.zh-CN.md)), and both ship inside the
+> [中文版](DISTRIBUTING.zh-CN.md) — the authoritative README is the Chinese
+> [README.md](../README.md), with its English mirror at
+> [README.en.md](../README.en.md). Every one of these files ships inside the
 > release archive.
 
 For whoever hands this to someone else — a colleague, a friend, a machine with no
@@ -11,7 +12,7 @@ project, so the rules below are not cosmetic.
 ## What to hand over
 
 ```bash
-make release          # dist/sensenova-u1-<version>-macos-arm64.tar.gz (+ .sha256)
+make release          # dist/imagehive-<version>-macos-arm64.tar.gz (+ .sha256)
 make release-verify   # installs that tarball into a private HOME and checks it
 ```
 
@@ -19,17 +20,19 @@ The archive is self-contained on purpose: `install.sh` sources `cli/lib/*.sh`, s
 a tarball holding only `prebuilt/` could not install anything.
 
 ```
-sensenova-u1-<version>-macos-arm64/
+imagehive-<version>-macos-arm64/
 ├── install.sh  uninstall.sh        the installers (`cli/` is sourced by them)
-├── prebuilt/                       sensenova-served, sensenova-mcp + MLX *.bundle
+├── prebuilt/                       imagehived, imagehive-mcp + MLX *.bundle
 ├── cli/  Docs/                     management CLI and the documentation it points at
-├── README.md  CHANGELOG.md  LICENSE  NOTICE
+├── README.md  README.en.md          the two user-facing READMEs
+├── AGENTS.md  LOCAL-SERVICE.md  UPSTREAM-README.md
+├── CHANGELOG.md  LICENSE  NOTICE
 ├── BUILD-INFO.txt                  version, git revision, build host
 └── SHA256SUMS                      every file above
 dist/<name>.tar.gz.sha256           checksum of the archive itself
 ```
 
-The version comes from `SV_VERSION` in `cli/lib/common.sh`; the upstream git tag
+The version comes from `IH_VERSION` in `cli/lib/common.sh`; the upstream git tag
 is recorded in `BUILD-INFO.txt` so a tarball is never mistaken for an upstream
 release. Weights are **never** bundled — `NOTICE` requires them to be downloaded
 from their publishers, and 11–33 GiB of Apache-2.0 weights do not belong in a
@@ -38,11 +41,11 @@ release.
 ## What the recipient does
 
 ```bash
-base=https://github.com/hrygo/SenseNovaU1-Service/releases/latest/download
-curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz"
-curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz.sha256"
-shasum -a 256 -c sensenova-u1-macos-arm64.tar.gz.sha256
-tar -xzf sensenova-u1-macos-arm64.tar.gz && cd sensenova-u1-*
+base=https://github.com/hrygo/ImageHive/releases/latest/download
+curl -fsSLO "$base/imagehive-macos-arm64.tar.gz"
+curl -fsSLO "$base/imagehive-macos-arm64.tar.gz.sha256"
+shasum -a 256 -c imagehive-macos-arm64.tar.gz.sha256
+tar -xzf imagehive-macos-arm64.tar.gz && cd imagehive-*
 bash install.sh
 ```
 
@@ -50,9 +53,15 @@ Then restart their agent and ask for an image. Nothing else: no Xcode, no Swift,
 no `sudo`, no build step.
 
 A release publishes the archive twice: under its versioned name
-(`sensenova-u1-<version>-macos-arm64.tar.gz`, for pinning) and under the stable
+(`imagehive-<version>-macos-arm64.tar.gz`, for pinning) and under the stable
 name above, so the one-liner does not have to be edited on every release. Both
 have a matching `.sha256`.
+
+The 0.6 rename **requires a new release**: the asset name went from
+`sensenova-u1-macos-arm64.tar.gz` to `imagehive-macos-arm64.tar.gz`, and
+`releases/latest/download/<asset>` only resolves against the newest release. An
+old release does not carry the new name, so the documented one-liner 404s the day
+the rename lands.
 
 ### Why `bash install.sh` and not `./install.sh`
 
@@ -64,39 +73,39 @@ Gatekeeper refuses to *execute* a quarantined file. Measured on macOS 26:
 * a quarantined **shell script** runs fine when `bash` reads it (`bash install.sh`
   works on a freshly downloaded copy);
 * BSD `install` and `cp` **propagate** the flag to their destination, so the
-  binaries would land in `~/.local/share/sensenova-u1/bin/` still quarantined and
+  binaries would land in `~/.local/share/imagehive/bin/` still quarantined and
   every MCP client launch would block.
 
 So the installer clears `com.apple.quarantine` from the files it installs
 (`dequarantine` in `install.sh`), and the README tells people to invoke it
 through `bash`. No signing identity and no notarisation are involved; if you do
-want a signed build, sign `prebuilt/sensenova-served` and
-`prebuilt/sensenova-mcp` with your Developer ID before `make release` and this
+want a signed build, sign `prebuilt/imagehived` and
+`prebuilt/imagehive-mcp` with your Developer ID before `make release` and this
 step becomes redundant for the binaries (the flag would still be cleared).
 
 ## Offline and locked-down machines
 
-1. Run the installer anywhere once to get the artifact (`sensenova-u1 models`),
+1. Run the installer anywhere once to get the artifact (`imagehive models`),
    or download a published `mlx-community/*` artifact by hand.
 2. Copy the tarball **and** the artifact directory
    (`<owner>-SenseNova-U1.5-8B-MoT-*`) to the target machine.
 3. There, put the artifact under
-   `~/Library/Application Support/SenseNovaU1/models/` and run
+   `~/Library/Application Support/ImageHive/models/` and run
    `bash install.sh --model none` — it keeps what is already on disk.
 
 ## Cutting a release
 
-The version is `SV_VERSION` in `cli/lib/common.sh` — bump it, then:
+The version is `IH_VERSION` in `cli/lib/common.sh` — bump it, then:
 
 ```bash
 make release-verify        # builds dist/, installs the tarball into a throwaway HOME
-V=0.5.2
+V=0.6.0
 git tag -a "v$V" -m "…" && git push origin "v$V"
-gh release create "v$V" --repo hrygo/SenseNovaU1-Service --title "…" --notes-file - \
-  "dist/sensenova-u1-$V-macos-arm64.tar.gz" \
-  "dist/sensenova-u1-$V-macos-arm64.tar.gz.sha256" \
-  dist/sensenova-u1-macos-arm64.tar.gz \
-  dist/sensenova-u1-macos-arm64.tar.gz.sha256
+gh release create "v$V" --repo hrygo/ImageHive --title "…" --notes-file - \
+  "dist/imagehive-$V-macos-arm64.tar.gz" \
+  "dist/imagehive-$V-macos-arm64.tar.gz.sha256" \
+  dist/imagehive-macos-arm64.tar.gz \
+  dist/imagehive-macos-arm64.tar.gz.sha256
 ```
 
 Four things that are easy to get wrong, all learned the hard way:
@@ -104,20 +113,20 @@ Four things that are easy to get wrong, all learned the hard way:
 * **Tag first, then build.** `BUILD-INFO.txt` records `git describe`, so building
   before the tag ships an archive that says `revision v0.5.0-18-gc8679f9` instead of
   `v0.5.2` — the number a user picks to compare against `project_version`.
-* **Upload the stable name as well.** `releases/latest/download/sensenova-u1-macos-arm64.tar.gz`
+* **Upload the stable name as well.** `releases/latest/download/imagehive-macos-arm64.tar.gz`
   is what the README tells people to `curl`, and it only resolves because some release
   carries an asset with exactly that name.
-* **Pass `--repo hrygo/SenseNovaU1-Service`.** This checkout also has `upstream`
-  (the fork's parent), and `gh` resolves the repository to it by default: the create
+* **Pass `--repo hrygo/ImageHive`.** This checkout also has `upstream`
+  (where the port came from), and `gh` resolves the repository to it by default: the create
   fails with "tag … has not been pushed to xocialize/sensenova-u1-swift", or lands in
   the wrong place if a matching tag exists there.
 * **Then check it the way a user would** — download the stable name anonymously and
   compare against the `.sha256` asset, rather than trusting the upload:
 
 ```bash
-base=https://github.com/hrygo/SenseNovaU1-Service/releases/latest/download
-curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz{,.sha256}"
-shasum -a 256 -c sensenova-u1-macos-arm64.tar.gz.sha256
+base=https://github.com/hrygo/ImageHive/releases/latest/download
+curl -fsSLO "$base/imagehive-macos-arm64.tar.gz{,.sha256}"
+shasum -a 256 -c imagehive-macos-arm64.tar.gz.sha256
 ```
 
 ## Checklist before handing it over

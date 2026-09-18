@@ -6,15 +6,15 @@ overridden.
 
 | What | Where | Override |
 |---|---|---|
-| App data: `config.json`, `service.conf`, `served.sock` | `~/Library/Application Support/SenseNovaU1/` | `SENSENOVA_HOME`, `--home` |
-| Model weights (11–66 GB) | `~/Library/Application Support/SenseNovaU1/models/` | `SENSENOVA_MODELS`, `--models` |
-| Commands on `PATH` | `~/.local/bin/sensenova-u1` | `SENSENOVA_PREFIX`, `--prefix` |
-| Private executables: `sensenova-served`, `sensenova-mcp`, the MLX `*.bundle`s, the CLI's own scripts | `~/.local/share/sensenova-u1/` (binaries in `bin/`) | `SENSENOVA_PREFIX`, `--prefix` |
-| Log | `~/Library/Logs/SenseNovaU1/served.log` | — |
-| Generated images, each with its `<name>.png.json` sidecar | `~/Pictures/SenseNovaU1/` | `SENSENOVA_OUT`, `--out` |
-| launchd job | `~/Library/LaunchAgents/<label>.plist` | `SENSENOVA_LABEL`, `--label` |
+| App data: `config.json`, `service.conf`, `imagehived.sock` | `~/Library/Application Support/ImageHive/` | `IMAGEHIVE_HOME`, `--home` |
+| Model weights (11–66 GB) | `~/Library/Application Support/ImageHive/models/` | `IMAGEHIVE_MODELS`, `--models` |
+| Commands on `PATH` | `~/.local/bin/imagehive` | `IMAGEHIVE_PREFIX`, `--prefix` |
+| Private executables: `imagehived`, `imagehive-mcp`, the MLX `*.bundle`s, the CLI's own scripts | `~/.local/share/imagehive/` (binaries in `bin/`) | `IMAGEHIVE_PREFIX`, `--prefix` |
+| Log | `~/Library/Logs/ImageHive/imagehived.log` | — |
+| Generated images, each with its `<name>.png.json` sidecar | `~/Pictures/ImageHive/` | `IMAGEHIVE_OUT`, `--out` |
+| launchd job | `~/Library/LaunchAgents/<label>.plist` | `IMAGEHIVE_LABEL`, `--label` |
 
-`sensenova-u1 paths` prints all of it for the install on this machine.
+`imagehive paths` prints all of it for the install on this machine.
 
 ## Why these
 
@@ -29,13 +29,13 @@ but it belongs to Homebrew: a third-party installer writing there is what
 **Weights under `~/Library/Application Support`.** Apple designates
 `~/Library` for "files that are not user data files", with Application Support
 for app-managed data and Caches for data that can be recreated. Weights are
-technically re-creatable, so `~/Library/Caches/SenseNovaU1/models` is a
+technically re-creatable, so `~/Library/Caches/ImageHive/models` is a
 defensible choice — but a 11.3 GB (4-bit) or 33 GB (bf16) re-download is an
 expensive way to discover that macOS reclaimed the cache, so the default is the
 non-purgeable location and the cache path stays available as an opt-in:
 
 ```bash
-./install.sh --models ~/Library/Caches/SenseNovaU1/models
+./install.sh --models ~/Library/Caches/ImageHive/models
 ```
 
 This also matches how other local model runners behave on macOS — Ollama keeps
@@ -55,7 +55,7 @@ ran, the seconds and peak memory, the project version. It is the same payload a
 is still self-describing after the terminal that produced it is gone. It is a
 plain file in the same directory, moved or copied with the image
 (`--out` moves both), and it can be turned off with `write_sidecar: false` in
-`config.json` or `SENSENOVA_SIDECAR=0`; an agent that wants a clean directory can
+`config.json` or `IMAGEHIVE_SIDECAR=0`; an agent that wants a clean directory can
 also delete them, at the cost of no longer being able to prove how an image was
 made.
 
@@ -112,5 +112,58 @@ Once the MCP clients have been restarted, the old directory is dead weight:
 rm -rf ~/Models/SenseNova-U1.5      # only after the clients restart
 ```
 
-`sensenova-u1 doctor` reports the old directory for as long as it is there.
+`imagehive doctor` reports the old directory for as long as it is there.
+
+## Upgrading from the old name (0.6)
+
+Up to 0.5.2 this project was called `sensenova-u1` and every path carried that
+name. 0.6 renamed all of it, so an install from the old name has state in places
+the current defaults never look:
+
+| Old (≤ 0.5.2) | New (0.6) |
+|---|---|
+| `~/Library/Application Support/SenseNovaU1/` | `~/Library/Application Support/ImageHive/` |
+| `~/Pictures/SenseNovaU1/` | `~/Pictures/ImageHive/` |
+| `~/Library/Logs/SenseNovaU1/served.log` | `~/Library/Logs/ImageHive/imagehived.log` |
+| `~/.local/share/sensenova-u1/` | `~/.local/share/imagehive/` |
+| `~/.local/bin/sensenova-u1` | `~/.local/bin/imagehive` |
+| launchd label `local.sensenova-u1` | `local.imagehive` (a `--label` of your own is renamed, not replaced: `com.hrygo.sensenova-u1` → `com.hrygo.imagehive`) |
+| `served.sock` | `imagehived.sock` |
+| `SENSENOVA_*` environment variables | `IMAGEHIVE_*` |
+
+`install.sh` migrates the default locations, in this order:
+
+1. **stops the old daemon, then clears its socket file.** This is first on
+   purpose. That daemon holds a second copy of the weights, and moving the app
+   home would move its socket file with it — the new daemon would then probe the
+   new path, get an answer, and exit 3 without binding, so a machine would look
+   upgraded while every reply still came from the old build;
+2. boots out the old LaunchAgent and deletes its plist, which would otherwise
+   start the old daemon again at the next login. The job is found by its content —
+   the plist says which binary it starts — because the label is user-settable. If
+   the label carries a brand token, it is *renamed* rather than replaced, so a
+   `--label com.hrygo.sensenova-u1` install ends up with `com.hrygo.imagehive` and
+   keeps its own prefix; an explicit `--label` on the command line wins over that;
+3. moves the app home, the image directory and the log directory onto the new
+   names (same-volume `mv`: instant, no copying of 11–66 GB);
+4. leaves the old *command* working but harmless: `~/.local/share/sensenova-u1/bin/*`
+   become wrappers onto the new binaries — old MCP client entries point straight
+   at those paths — while the old script and its libraries are removed, because
+   their defaults resolve the pre-0.6 home and would start a service of their own;
+5. removes the old `sensenova` MCP entries from the clients it knows about. Two
+   entries expose the same six tools, and a client that keeps both shows every
+   tool twice.
+
+Paths chosen with `--home`, `--models`, `--out` or `--prefix` are not touched:
+there is nothing at the old defaults to find, and moving a directory the user
+chose is worse than printing where things are. `imagehive doctor` reports the old
+app home, an old daemon still running, and any client left with the old entry.
+
+The old app home and the old image directory are never deleted for you — one is
+11–66 GB of artifacts, the other is the user's own pictures. Delete them once
+`imagehive doctor` is clean:
+
+```bash
+rm -rf "$HOME/Library/Application Support/SenseNovaU1" ~/Pictures/SenseNovaU1
+```
 Nothing in the new layout depends on it.

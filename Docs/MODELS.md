@@ -14,11 +14,11 @@ artifacts below are published ready to run, tokenizer included.
 | `quality-bf16` | `mlx-community/SenseNova-U1.5-8B-MoT-bf16` | 33 GiB | ~35 GB | quality | 50-step quality, text rendering, editing, VQA |
 
 ```bash
-sensenova-u1 models                          # installed / not installed
-sensenova-u1 models pull fast-4bit           # ModelScope first, Hugging Face fallback
-sensenova-u1 models pull quality-bf16 hf     # force a source
-sensenova-u1 models pull all                 # everything (48 GiB+)
-sensenova-u1 models verify                   # sizes on disk vs the download manifest
+imagehive models                          # installed / not installed
+imagehive models pull fast-4bit           # ModelScope first, Hugging Face fallback
+imagehive models pull quality-bf16 hf     # force a source
+imagehive models pull all                 # everything (48 GiB+)
+imagehive models verify                   # sizes on disk vs the download manifest
 ```
 
 ## Image sizes
@@ -37,7 +37,7 @@ loaded, and the message names legal values to use instead.
 | portrait 9:16 | 896×1600 |
 
 1024×1024 is the default when a request names no size, and the reference point
-for comparisons. `sensenova-u1 options` prints this table in a terminal and
+for comparisons. `imagehive options` prints this table in a terminal and
 `model_options` returns it as JSON, so a client can read the contract up front
 instead of discovering it from a rejection.
 
@@ -65,7 +65,7 @@ only the bytes that are missing.
 | 64 GB+ | both tiers comfortably; raise `ttl_seconds` if you want to stay warm |
 
 The daemon holds **one** tier at a time: asking for the other tier releases the
-first. `sensenova-u1 status` shows `resident_tier`, `last_peak_mb` and
+first. `imagehive status` shows `resident_tier`, `last_peak_mb` and
 `loads_total`.
 
 ## One artifact is enough
@@ -90,18 +90,18 @@ steps with cfg 4.0 (an explicit `steps` / `cfg` still wins, as always). A
 fallback therefore cannot quietly produce an out-of-distribution image, it can
 only produce the best image the installed artifact knows how to make.
 
-Where to see it: `model_status` (and `sensenova-u1 status`) report
-`available_tiers`; `sensenova-u1 models` prints each tier's directory and
-whether it is installed; `sensenova-u1 doctor` reports a missing artifact as a
+Where to see it: `model_status` (and `imagehive status`) report
+`available_tiers`; `imagehive models` prints each tier's directory and
+whether it is installed; `imagehive doctor` reports a missing artifact as a
 note, not a failure. The daemon reads `config.json` once at startup, so after
-adding or removing an artifact, `sensenova-u1 restart`.
+adding or removing an artifact, `imagehive restart`.
 
 ## Using artifacts you already have
 
 Point the daemon at any directory with the same shape:
 
 ```json
-// ~/Library/Application Support/SenseNovaU1/config.json
+// ~/Library/Application Support/ImageHive/config.json
 {
   "ttl_seconds": 600,
   "min_warm_seconds": 60,
@@ -114,8 +114,8 @@ leave the other one out (or pointing at a path that is not there) and the daemon
 serves both tiers from the one it finds.
 
 Relative paths resolve against the models root
-(`~/Library/Application Support/SenseNovaU1/models` by default —
-`sensenova-u1 paths` prints it, `SENSENOVA_MODELS` or `--models` moves it). This
+(`~/Library/Application Support/ImageHive/models` by default —
+`imagehive paths` prints it, `IMAGEHIVE_MODELS` or `--models` moves it). This
 is how a machine that built its own artifacts (for example a bf16 8-step merge
 produced with the upstream `sensenova-cli convert`) can use them instead of
 downloading a preset.

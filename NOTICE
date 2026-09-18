@@ -1,20 +1,26 @@
-SenseNovaU1-Service
+ImageHive
 ===================
 
-This repository is a fork of the Swift/MLX port of SenseNova-U1.5 and ships a
-resident local image service on top of it. Third-party material it builds on:
+This repository carries the Swift/MLX port of SenseNova-U1.5 together with its
+commit history, and ships a resident local image service on top of it. It is an
+independent repository — GitHub records no fork relationship with upstream — and
+third-party material it builds on is:
+
+(Its own name was `sensenova-u1` up to release 0.5.2 and is ImageHive from 0.6 on.
+Only this repository's own names changed — the upstream port, the upstream
+repository and the model artifacts kept theirs.)
 
 1. sensenova-u1-swift — https://github.com/xocialize/sensenova-u1-swift
    Copyright (c) 2026 Xocialize. MIT License (see LICENSE).
-   This fork is based on upstream commit 96a0c9b ("publish the pose tiers to
+   The port is taken from upstream commit 96a0c9b ("publish the pose tiers to
    mlx-community, verified on the downloaded bytes"), the tip of upstream's main
-   branch at the time of forking. Upstream's sources, tests, Package.resolved and
-   its own Docs/ (publish/, receipts/) are unchanged.
-   The additions of this fork, all under the same MIT terms, are: the resident
-   service and MCP front end (Sources/sensenova-served, Sources/sensenova-mcp),
+   branch at the time it was taken. Upstream's sources, tests, Package.resolved
+   and its own Docs/ (publish/, receipts/) are unchanged.
+   The additions of this repository, all under the same MIT terms, are: the resident
+   service and MCP front end (Sources/imagehived, Sources/imagehive-mcp),
    the management CLI and installers (cli/, install.sh, uninstall.sh), the build
    and release plumbing (Makefile, scripts/, .github/), and its documentation
-   (README, README.zh-CN, CHANGELOG, NOTICE, Docs/CLIENTS, Docs/LAYOUT,
+   (README, README.en, AGENTS, CHANGELOG, NOTICE, Docs/CLIENTS, Docs/LAYOUT,
    Docs/MODELS, Docs/TROUBLESHOOTING, Docs/DISTRIBUTING + the zh-CN pair).
    Copyright (c) 2026 hrygo.
 
