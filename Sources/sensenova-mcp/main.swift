@@ -62,8 +62,21 @@ let userHome = environment["HOME"] ?? FileManager.default.homeDirectoryForCurren
 let homePath = environment["SENSENOVA_HOME"]
     ?? "\(userHome)/Library/Application Support/SenseNovaU1"
 let socketPath = environment["SENSENOVA_SOCKET"] ?? "\(homePath)/served.sock"
-let servedBinaryPath = environment["SENSENOVA_SERVED_BIN"]
-    ?? "\(environment["SENSENOVA_PREFIX"] ?? "\(userHome)/.local")/share/sensenova-u1/bin/sensenova-served"
+/// Where the daemon lives. `SENSENOVA_SERVED_BIN` is what the installer writes into
+/// every client entry, so it wins. Next to this front end is the next best answer
+/// and the one that cannot be wrong — the two binaries are installed into the same
+/// directory — whereas the prefix-based default is wrong for every install that used
+/// `--prefix`: a front end launched without the environment (a plain `sensenova-u1
+/// status`) then looked under `~/.local/share` and reported "sensenova-served not
+/// found" on an install that was perfectly fine.
+let servedBinaryPath: String = {
+    if let explicit = environment["SENSENOVA_SERVED_BIN"], !explicit.isEmpty { return explicit }
+    if let here = Bundle.main.executableURL?.resolvingSymlinksInPath().deletingLastPathComponent() {
+        let beside = here.appendingPathComponent("sensenova-served").path
+        if FileManager.default.isExecutableFile(atPath: beside) { return beside }
+    }
+    return "\(environment["SENSENOVA_PREFIX"] ?? "\(userHome)/.local")/share/sensenova-u1/bin/sensenova-served"
+}()
 
 let latestRevision = "2026-07-28"
 let legacyRevision = "2025-11-25"
@@ -151,6 +164,13 @@ final class DaemonClient {
     private var childLog: FileHandle?
     private let lock = NSLock()
     private var spawned = false
+    /// Why the last spawn attempt could not even start the process. Kept so a broken
+    /// install fails immediately: without it every request polled for the full 30 s
+    /// handshake deadline before saying anything, which reads as a hung service.
+    private var spawnError: String?
+    /// Written into the "could not reach" message — the daemon explains itself there
+    /// (a socket path that is too long, a port clash, a missing artifact).
+    private var daemonLogPath: String?
 
     private func connectOnce() -> Bool {
         let raw = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -168,7 +188,9 @@ final class DaemonClient {
         guard !spawned else { return }
         spawned = true
         guard FileManager.default.fileExists(atPath: servedBinaryPath) else {
-            log("sensenova-served not found at \(servedBinaryPath)")
+            spawnError = "the local image service is not installed: no sensenova-served at "
+                + "\(servedBinaryPath) — run install.sh"
+            log(spawnError!)
             return
         }
         let process = Process()
@@ -185,6 +207,7 @@ final class DaemonClient {
             .appendingPathComponent("Library/Logs/SenseNovaU1")
         try? FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
         let logPath = logDirectory.appendingPathComponent("served.log").path
+        daemonLogPath = logPath
         if !FileManager.default.fileExists(atPath: logPath) {
             FileManager.default.createFile(atPath: logPath, contents: nil)
         }
@@ -198,7 +221,8 @@ final class DaemonClient {
             child = process
             log("started sensenova-served (pid \(process.processIdentifier))")
         } catch {
-            log("could not start sensenova-served: \(error)")
+            spawnError = "could not start sensenova-served: \(error)"
+            log(spawnError!)
         }
     }
 
@@ -216,13 +240,18 @@ final class DaemonClient {
         }
         if connectOnce() { return }
         spawnServed()
+        // Nothing to wait for: the process never came up, so the 30 s poll below
+        // would only delay the same answer.
+        if let spawnError { throw DaemonError(description: spawnError) }
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline {
             Thread.sleep(forTimeInterval: 0.25)
             if connectOnce() { return }
         }
-        throw DaemonError(description:
-            "could not reach sensenova-served at \(socketPath) (binary \(servedBinaryPath))")
+        throw DaemonError(description: """
+            sensenova-served did not answer on \(socketPath) within 30s (binary \
+            \(servedBinaryPath)). Its log explains why: \(daemonLogPath ?? "(no log path)")
+            """)
     }
 
     private func readMessage() -> Data? {
@@ -247,7 +276,12 @@ final class DaemonClient {
             throw DaemonError(description: "write to sensenova-served failed")
         }
         guard let line = readMessage() else {
-            throw DaemonError(description: "sensenova-served closed the connection")
+            throw DaemonError(description: """
+                the local image service stopped while this request was running — it was \
+                restarted, stopped or crashed. An image is written before the reply is sent, \
+                so this request may have left a file behind even though it failed; check the \
+                output directory. Run `sensenova-u1 status` to see where the service is.
+                """)
         }
         guard let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else {
             throw DaemonError(description: "unreadable response from sensenova-served")
@@ -263,18 +297,37 @@ final class DaemonClient {
 
     /// Serialized on purpose: one MCP front end is one caller, and the daemon
     /// serializes generations anyway.
+    ///
+    /// Retrying after a dropped connection is only safe for requests that change
+    /// nothing: a render writes its PNG *before* the reply goes out, so a retry after
+    /// a daemon that died in between would write a second file under a second name and
+    /// the caller — an agent comparing runs, typically — would never learn that its
+    /// sample set now has an extra image in it. Read-only requests are retried; a
+    /// dropped render is reported instead.
+    private func isRetryable(_ payload: [String: Any]) -> Bool {
+        let cmd = (payload["cmd"] as? String) ?? ""
+        return cmd == "vqa" || ["status", "options", "unload"].contains(cmd)
+    }
+
     func call(_ payload: [String: Any]) throws -> [String: Any] {
         lock.lock()
         defer { lock.unlock() }
         var lastError: Error = DaemonError(description: "unreachable")
-        for attempt in 0..<2 {
+        var attempts = isRetryable(payload) ? 2 : 1
+        while attempts > 0 {
+            attempts -= 1
             do {
                 if fd < 0 { try connectToDaemon() }
                 return try roundTrip(payload)
             } catch {
                 lastError = error
+                // Only a connection that was *lost* is worth retrying. A daemon that
+                // never answered has already been waited for — the handshake poll — and
+                // retrying it just doubles the wait before the same message (measured:
+                // a socket path the daemon cannot bind kept `--status` waiting 60 s).
+                let wasConnected = fd >= 0
                 dropConnection()
-                if attempt == 0 { continue }
+                if !wasConnected { break }
             }
         }
         throw lastError
@@ -288,9 +341,17 @@ let daemon = DaemonClient()
 func runManagementSwitch(_ flag: String) {
     switch flag {
     case "--status":
-        let response = (try? daemon.call(["cmd": "status"])) ?? [:]
+        // The real reason, not just "unreachable": it now names the log file and the
+        // binary path, which is what turns this into something a user can act on.
+        let response: [String: Any]
+        do {
+            response = try daemon.call(["cmd": "status"])
+        } catch {
+            print("daemon unreachable — \(error)")
+            exit(1)
+        }
         guard let status = response["status"] as? [String: Any] else {
-            print("daemon unreachable")
+            print("daemon answered without a status block")
             exit(1)
         }
         let resident = (status["resident_tier"] as? String) ?? "cold"
@@ -322,10 +383,22 @@ func runManagementSwitch(_ flag: String) {
                 + "\(intValue(current["percent"]) ?? 0)% "
                 + "elapsed \(doubleValue(current["elapsed_seconds"]) ?? 0)s")
         }
+        // Settings the daemon could not read out of config.json. They are only ever
+        // absent when the file is fine, so printing them when present keeps the usual
+        // output unchanged while making a silent fallback to the defaults visible.
+        for warning in (status["config_warnings"] as? [String]) ?? [] {
+            print("config_warning=\(warning)")
+        }
     case "--unload":
-        let response = (try? daemon.call(["cmd": "unload"])) ?? [:]
+        let response: [String: Any]
+        do {
+            response = try daemon.call(["cmd": "unload"])
+        } catch {
+            print("could not unload — \(error)")
+            exit(1)
+        }
         guard (response["ok"] as? Bool) == true else {
-            print("could not unload: \((response["error"] as? String) ?? "daemon unreachable")")
+            print("could not unload: \((response["error"] as? String) ?? "the daemon refused without saying why")")
             exit(1)
         }
         print("released \((response["unloaded"] as? String) ?? "none"); resident_tier=cold")
