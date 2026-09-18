@@ -87,6 +87,31 @@ the build (`pid=`, `project_version=`). `doctor` reports a mismatch as
 `the daemon answering reports version X, this install is Y`. A daemon from before
 0.5.1 does not report a version at all, which is the same signal.
 
+**`seed must be a number, got the string "126"` (or the same for `width`).**
+Arguments are typed: a key that is present with the wrong JSON type is an error
+rather than a silent fallback, so send numbers as numbers (`"width": 512`, not
+`"width": "512"`) and booleans as `true`/`false`. Only an *absent* key means "use
+the default" — omit `seed` for a random one. Before 0.5.2 every one of these was
+accepted and quietly dropped (a string seed produced a *random* seed, a string
+`steps` ran 50), which is why the refusal now names what it received.
+
+**The settings in `config.json` are being ignored.**
+A `config.json` the daemon cannot parse is no longer accepted in silence: it logs
+`<path> is not valid JSON — every setting in it is ignored` at startup, `status`
+prints a `config_warning=` line, and `doctor` reports `config.json is not valid
+JSON`. A single key with the wrong type is reported by name
+(`config.json: ttl_seconds must be a number … — that key is ignored`) and the rest
+of the file still applies. Remember that environment variables win over the file,
+so if a value changes nothing, check whether `SENSENOVA_TTL_SECONDS` and friends
+are set in the launchd job or in the client entry that starts the daemon.
+
+**`sensenova-u1 status` says the daemon is unreachable, but the socket file is there.**
+That file can outlive its process (a crash, `kill -9`, a wedged machine). Nothing
+acts on the file alone any more: every readiness check connects, a daemon starting
+up unlinks a socket nobody is listening on before it binds, and `sensenova-u1 stop`
+ends whatever still owns it — by process name, never by path alone. `doctor` and
+`status` are safe to run: they will start a daemon if none is there.
+
 **`width 833 is not a multiple of 32` (or the same for `height`).**
 The model renders on a latent grid of `size/32`, so both dimensions have to be
 multiples of 32 (32–4096 px). The message names the nearest valid value: use it.

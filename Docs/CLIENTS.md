@@ -99,6 +99,12 @@ Things an agent should know before it starts:
 * **Sizes are multiples of 32**, 32–4096 px. The latent grid is `size/32`, so anything
   else is refused with the nearest valid value — it used to abort the whole process.
   Recommended: 1024×1024, 1216×832, 1600×896, 896×1600.
+* **Send each argument as the type it is.** Numbers as numbers (`"width": 512`, not
+  `"width": "512"`), booleans as `true`/`false`, `images` as an array of absolute
+  paths. A present-but-wrong type is refused with the value it received; only an
+  absent argument means "use the default". This is what makes a run reproducible —
+  before 0.5.2 a string `seed` was replaced by a *random* one and a string `steps`
+  by the tier default, both silently.
 * **`seed` makes a run reproducible**: same seed + same artifact + same settings =
   byte-identical PNG. Without it the seed is random and the reply says so
   (`seed_source=random`), which is the difference between a result you can repeat and

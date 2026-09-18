@@ -227,6 +227,12 @@ Start with `sensenova-u1 doctor`. The usual suspects:
 * **Client shows no tools** — restart the client; MCP servers are loaded per session.
 * **Generation is slow after an idle period** — that is the model loading; keep
   `ttl_seconds` higher if you would rather stay warm.
+* **`width must be a number, got the string "512"`** — arguments are typed; only an
+  absent key means "use the default", a present key of the wrong type is refused with
+  the value it received. Send numbers as numbers.
+* **Your `config.json` edits change nothing** — the daemon logs which keys it could
+  not read and `doctor` says `config.json is not valid JSON`. Environment variables
+  win over the file.
 
 More in [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md).
 

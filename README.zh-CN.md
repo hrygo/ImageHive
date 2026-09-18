@@ -1,10 +1,10 @@
 # SenseNova-U1.5 本机生图服务
 
-> [English](README.md) · 英文版为准，中文版随 0.5.1 同步。术语、命令、字段、模型
+> [English](README.md) · 英文版为准，中文版随 0.5.2 同步。术语、命令、字段、模型
 > 名保持原文，方便和日志、配置、英文文档对上。
 >
 > 版本号：接续上游 tag 序列（fork 时上游停在 `v0.4.0`），因此首个公开版是
-> **0.5.0**，当前版本 **0.5.1**；发行包里的 `BUILD-INFO.txt` 记录所基于的上游提交。
+> **0.5.0**，当前版本 **0.5.2**；发行包里的 `BUILD-INFO.txt` 记录所基于的上游提交。
 
 在自己的 Mac 上跑文生图、按指令改图和看图问答，通过 MCP 交给 AI agent 使用。
 不需要 API key、不按张计费、图片不出本机；模型经 MLX 在 Apple 芯片上运行，
@@ -189,6 +189,17 @@ sensenova-u1 generate --prompt "一盏黄铜台灯" --seed 42 --n 4 --out ~/eval
 
 **内存吃紧。** `sensenova-u1 unload` 立刻释放；想更自动就把 `ttl_seconds` 改小
 （例如 120）。实际开销看 `sensenova-u1 status` 的 `last_peak_mb`。
+
+**报错 `seed must be a number, got the string "126"`（`width` 同理）。** 参数是强类型的：
+数字要传数字（`"width": 512`，不是 `"width": "512"`），布尔传 `true`/`false`；只有"不传"
+才等于用默认值。0.5.2 之前这类参数会被静默替换成默认值——字符串 seed 会变成**随机**
+seed，字符串 steps 会按档位默认值跑，做对比评测的人看不出来。
+
+**改了 `config.json` 却不生效。** 解析不了的文件不再被静默接受：守护进程启动时会写
+`... is not valid JSON — every setting in it is ignored`，`status` 里有 `config_warning=`，
+`doctor` 也会报 `config.json is not valid JSON`；单个键类型不对会点名报出来，其余键照常生效。
+另外环境变量优先于文件（`SENSENOVA_TTL_SECONDS` 会盖掉 `ttl_seconds`），
+所以还要看启动守护进程的客户端条目和 launchd job 里的环境。
 
 **想卸载。** `./uninstall.sh`（默认保留权重，重装很快）；要连权重一起删：
 `./uninstall.sh --purge-models`。

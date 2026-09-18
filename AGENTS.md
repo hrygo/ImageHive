@@ -59,6 +59,22 @@ documentation.
    and anything that describes what the service accepts also goes into
    `model_options`. A field added in only one of them is the drift that made
    "which prompt produced this file?" unanswerable.
+9. **A request is read strictly, and only the daemon decides what a request
+   means.** A key that is *present with the wrong type* is an error; only an
+   *absent* key means "use the default". The lenient readers (`intArg`, `doubleArg`)
+   were removed for this reason: they turned `"width": "512"` into 1024x1024,
+   `"steps": "4"` into 50 steps and `"seed": "126"` into a **random** seed, so a
+   caller comparing runs never learned its settings had been dropped. Two traps
+   when you touch this: (a) `raw is Bool` is **true** for any JSON number that
+   holds 0 or 1 — use `jsonIsBoolean`, which asks CoreFoundation, or `"seed": 1`
+   and `"steps": 1` get rejected as booleans; (b) validate before `ensureLoaded`,
+   including file paths, so a bad request never pulls 34 GB.
+10. **A child process must be told the layout, not left to infer it.** `sv_load_conf`
+    exports the paths it resolved, and `install.sh` exports `SENSENOVA_VERSION`;
+    a front end or daemon that falls back to the built-in defaults while the CLI
+    talks to a `--home`/`--prefix` install starts a *second* service on the default
+    socket — the one thing this project must not do (measured 2026-09-18: a
+    sandboxed install started a second daemon in the real app home).
 
 ## Layout and configuration
 
@@ -100,7 +116,10 @@ Any change to the daemon, the front end or the installer is expected to keep
 these green, and to say so in the commit message:
 
 1. `swift build -c release` for both products — no new warnings.
-2. `make test-quick` — protocol, single-instance refusal, cold status.
+2. `make test-quick` — protocol, single-instance refusal, cold status, and the
+   daemon-side contract the CLI depends on (wrong-typed arguments, an empty line,
+   a missing image path, `stop` removing the socket). CI runs this, so anything
+   asserted here is checked on every push.
 3. `make test` — `Tests/smoke.sh` plus `Tests/cli.sh`: three concurrent clients,
    one load (`loads_total == 1`), one `sensenova-served` process, and the CLI's
    own contract (help, validation, `--json`, seed/sidecar, `--out`, `--n`). The

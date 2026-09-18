@@ -1,6 +1,63 @@
 # Changelog
 
-## Unreleased
+## 0.5.2 — 2026-09-18
+
+**The service no longer guesses what a client meant, and a request that cannot
+run costs nothing.** This round came out of asking one question of the whole
+manager — "can this process be trusted with 34 GB of other people's work?" — and
+answering it with a stress harness rather than a happy path.
+
+* **A wrongly typed argument is refused; only an absent key means "default".**
+  Measured before this change: `"width": "512"` rendered 1024x1024, `"steps":
+  "4"` ran 50 steps and `"seed": "126"` produced a **random** seed — a client
+  comparing two runs had no way to learn that its settings had been dropped.
+  Every argument the model-backed commands read now goes through one strict
+  reader, and the error names what was sent (`seed must be a number, got the
+  string "126"`).
+* **The trap strictness walks into.** Swift's `is Bool` is true for any JSON
+  number holding 0 or 1, so the first version of that guard rejected `"seed": 1`
+  and `"steps": 1` as booleans — caught by `Tests/smoke.sh` on its first run
+  (three concurrent clients, seeds 1–3). Booleans are now told apart from numbers
+  by CoreFoundation type id, and the CLI's reproducibility pair is generated with
+  `--seed 1` so the case stays covered.
+* **A request that cannot run is refused before the weights are loaded.** The
+  reference images for `edit_image`/`describe_image` are decoded before
+  `ensureLoaded`, so a typo costs nothing instead of 34 GB. `describe_image` used
+  to drop an unreadable path with `compactMap { try? … }` and then answer about
+  nothing; it now says `no such image: <path>`, and an empty question with no
+  images is no longer a request.
+* **The socket has a lifecycle, not just a file.** SIGTERM/SIGINT unlink the
+  socket before exiting, so a stopped daemon no longer leaves behind the exact
+  thing every readiness check looks for (measured: an install that reported its
+  service up and then failed its own smoke test). A bare newline gets an answer
+  instead of silence, a client that disconnects without its trailing newline is
+  logged, and a request line above 16 MiB is refused rather than buffered.
+* **The front end fails fast and names its log.** `sensenova-mcp` resolves the
+  daemon beside itself (the `--prefix` install that used to look under
+  `~/.local/share`), says `not installed: no sensenova-served at <path> — run
+  install.sh` immediately instead of polling for 30 s, points at the daemon's log
+  when the handshake times out, and retries only read-only requests: a render that
+  dies mid-request may already have written its PNG, so it is reported, not
+  repeated.
+* **A `config.json` that cannot be used says so.** A truncated file, a type-wrong
+  `ttl_seconds` and a 000-mode file all used to run the built-in defaults in
+  silence. The daemon now logs one warning per unusable key, `status` carries
+  `config_warnings`, and `doctor` reports `config.json is not valid JSON`.
+* **The CLI exports the layout it resolved.** `sv_load_conf` now exports
+  `SENSENOVA_HOME/MODELS/OUT/SOCKET/PREFIX/LABEL`, which is the root cause of an
+  install under `--home` starting a *second* daemon on the default socket — the
+  one thing this project must not do. `start`/`stop`/`restart` report whether
+  something answers afterwards rather than what launchctl was asked to do, and
+  `doctor` reads the daemon's status once instead of three times (which could
+  disagree with itself).
+* **Tests:** the daemon-side assertions — wrong types, empty line, missing image,
+  unterminated request, `stop` removing the socket — moved into `--quick` mode so
+  CI covers them; `Tests/socket_probe.py` drives the protocol directly. The
+  installer's own check now compares the version the daemon reports and the home
+  it bound, instead of treating "unreachable" as "version mismatch".
+* [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md): wrong-typed arguments, a
+  `config.json` whose settings are being ignored, and a socket that outlived its
+  daemon.
 
 **Reinstalling now actually changes what runs.** Found by doing it: the daemon
 that answers is normally started by whichever MCP front end needed it first
