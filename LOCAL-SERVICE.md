@@ -81,6 +81,15 @@ git rebase origin/main local/main
 - 没有接上游 `MLXSenseNovaU1` 的 MLXEngine 契约包：本服务只需要"一份权重 + 串行出图 +
   空闲卸载"，直接调 `SenseNovaU1` 核心少一层版本耦合；需要引擎的内存预算/压力驱逐时再接。
 - 没有实现 MCP tasks 扩展：当前是同步阻塞 + 服务端串行队列，客户端一直等到出图完成。
-- 权重目录与构建目录分离：权重在 `~/Library/Application Support/SenseNovaU1/models`（本机 33GB × 2 档），
+- **请求不可取消**：已派发的请求在守护进程里跑到落盘，客户端断开也不停（批量评测要按此
+  计数，中断不会回收样本）。协议层如实声明这一点（`model_options` 的
+  `cancellation.supported = false`），不做假装成功的取消。
+- **状态与进度不进 actor**：`status`、`options`、忙碌时的 `unload` 由连接线程从
+  `StatusBoard` 快照直接回答。原先它们排在长同步的 `t2iGenerate` 后面，实测一次
+  1536x1024/50 步生成会把 `model_status` 阻塞 75.3s（"忙"与"卡死"因此无法区分）。
+  进度由调用方轮询 `current`，不往 socket 上发消息——保持一行请求一行响应。
+- **校验前移**：尺寸/步数/seed 在任何权重加载之前校验。模型渲染不了的尺寸不是失败请求，
+  而是不可捕获的 `[reshape]` fatal（实测 1000x1000 会带走整个共用服务）。
+- 权重目录与构建目录分离：权重在 `~/Library/Application Support/SenseNovaU1/models`（本机 33GB，只留品质档），
   可执行文件在 `~/.local/share/sensenova-u1`，出图在 `~/Pictures/SenseNovaU1`；本仓库只放代码。
   选择依据与迁移方式见 `Docs/LAYOUT.md`。
