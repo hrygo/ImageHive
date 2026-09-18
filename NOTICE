@@ -1,0 +1,32 @@
+SenseNovaU1-Service
+===================
+
+This repository is a fork of the Swift/MLX port of SenseNova-U1.5 and ships a
+resident local image service on top of it. Third-party material it builds on:
+
+1. sensenova-u1-swift — https://github.com/xocialize/sensenova-u1-swift
+   Copyright (c) 2026 Xocialize. MIT License (see LICENSE).
+   The upstream sources, tests, Docs/ and Package.resolved are unchanged; the
+   additions of this fork are the two executables under Sources/sensenova-served
+   and Sources/sensenova-mcp, the installer/CLI under cli/, install.sh,
+   uninstall.sh and the documentation.
+
+2. SenseNova-U1.5-8B-MoT model weights — https://huggingface.co/sensenova/SenseNova-U1.5-8B-MoT
+   Copyright SenseTime. Apache License 2.0. The weights are NOT distributed with
+   this repository; install.sh downloads them from ModelScope or Hugging Face at
+   the user's request.
+
+3. 8-step distillation LoRA — https://huggingface.co/xocialize/SenseNova-U1.5-8B-MoT-LoRAs
+   Published by Xocialize; downloaded only when a user builds that artifact
+   themselves.
+
+4. Pre-converted MLX artifacts — https://huggingface.co/mlx-community
+   (mirrored on ModelScope as mlx-community/*). Downloaded, not redistributed.
+
+5. mlx-swift (MIT), swift-transformers (Apache-2.0) and other Swift package
+   dependencies are resolved by SwiftPM from their own repositories under the
+   terms of their respective licenses; see Package.resolved for the exact pins.
+
+When you redistribute this service, keep this file, LICENSE and the upstream
+attribution intact, and point users at the model licenses above — the weights
+carry their own terms even though this code is MIT.

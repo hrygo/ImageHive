@@ -1,0 +1,32 @@
+name: ci
+
+# The package targets macOS 26 (see Package.swift), so the runner image has to
+# provide that SDK; adjust the label if your repository uses a different one.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Show toolchain
+        run: swift --version && sw_vers
+
+      - name: Build
+        run: make build
+
+      - name: Smoke test (protocol, no model)
+        run: make test-quick
+
+      - name: Installer dry run
+        run: ./install.sh --dry-run --model none --clients none
+
+      - name: Uninstaller dry run
+        run: ./uninstall.sh --dry-run
