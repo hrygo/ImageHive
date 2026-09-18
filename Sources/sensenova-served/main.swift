@@ -19,6 +19,7 @@
 // the defaults below describe a stock `install.sh` layout.
 
 import CoreGraphics
+import CryptoKit
 import Foundation
 import ImageIO
 import MLX
@@ -27,9 +28,34 @@ import UniformTypeIdentifiers
 
 let environmentForConfig = ProcessInfo.processInfo.environment
 
-let serviceVersion = "0.1.0"
+/// The socket protocol version: bumped only when the wire format changes in a way
+/// an existing client would misread. Reported by `status` and `options`.
+let protocolVersion = 1
+
+/// The project version — `cli/lib/common.sh`'s `SV_VERSION`, which `install.sh`
+/// writes into `service.conf`. Without the key (an install from before this key
+/// existed, or a bare `swift run` in a checkout) this says `unknown` rather than a
+/// number that belongs to nothing: it used to print `0.1.0`, which matched no
+/// release, no commit and no tarball, so a run could not be traced back to a build.
+func confValue(_ key: String, in path: String) -> String? {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    for line in text.split(separator: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("\(key)=") else { continue }
+        let raw = trimmed.dropFirst(key.count + 1)
+        return raw.trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+    }
+    return nil
+}
+
+let userHomeEarly = environmentForConfig["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+let projectVersion = environmentForConfig["SENSENOVA_VERSION"]
+    ?? confValue("SENSENOVA_VERSION", in: environmentForConfig["SENSENOVA_CONF"]
+        ?? "\(environmentForConfig["SENSENOVA_HOME"] ?? "\(userHomeEarly)/Library/Application Support/SenseNovaU1")/service.conf")
+    ?? "unknown"
+
 if CommandLine.arguments.dropFirst().contains(where: { $0 == "--version" || $0 == "-v" }) {
-    print("sensenova-served \(serviceVersion)")
+    print("sensenova-served \(projectVersion) (socket protocol \(protocolVersion))")
     exit(0)
 }
 
@@ -39,7 +65,8 @@ if CommandLine.arguments.dropFirst().contains(where: { $0 == "--version" || $0 =
 ///       "ttl_seconds": 600,
 ///       "min_warm_seconds": 60,
 ///       "fast_artifact": "SenseNova-U1.5-8B-MoT-8step-4bit",
-///       "quality_artifact": "SenseNova-U1.5-8B-MoT-bf16"
+///       "quality_artifact": "SenseNova-U1.5-8B-MoT-bf16",
+///       "write_sidecar": true
 ///     }
 ///
 /// Artifact paths are relative to SENSENOVA_MODELS unless absolute. The file is
@@ -52,6 +79,9 @@ struct ServiceConfig {
     var minWarmSeconds: Double = 60
     var fastArtifact = "SenseNova-U1.5-8B-MoT-8step-4bit"
     var qualityArtifact = "SenseNova-U1.5-8B-MoT-bf16"
+    /// Write `<image>.png.json` next to every image; see the sidecar note in the
+    /// validation section below. `null` means the built-in default (on).
+    var writeSidecar: Bool?
 
     static func load(from url: URL) -> ServiceConfig {
         var config = ServiceConfig()
@@ -64,6 +94,7 @@ struct ServiceConfig {
         if let value = object["min_warm_seconds"] as? Int { config.minWarmSeconds = Double(value) }
         if let value = object["fast_artifact"] as? String, !value.isEmpty { config.fastArtifact = value }
         if let value = object["quality_artifact"] as? String, !value.isEmpty { config.qualityArtifact = value }
+        if let value = object["write_sidecar"] as? Bool { config.writeSidecar = value }
         return config
     }
 }
@@ -71,7 +102,7 @@ struct ServiceConfig {
 // $HOME first, then the passwd entry: the shell CLI and the installers all use
 // $HOME, so honouring it here keeps a sandboxed or overridden HOME consistent
 // instead of silently reaching back into the real user's app home.
-let userHome = environmentForConfig["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+let userHome = userHomeEarly
 let home = URL(fileURLWithPath: environmentForConfig["SENSENOVA_HOME"]
     ?? "\(userHome)/Library/Application Support/SenseNovaU1")
 let modelsRoot = URL(fileURLWithPath: environmentForConfig["SENSENOVA_MODELS"]
@@ -135,6 +166,310 @@ func resolveTier(_ tier: String) -> String {
     return artifactReady(fallback) ? fallback : wanted
 }
 
+// MARK: - request validation
+
+/// Everything a client can get wrong is answered with an ordinary error result
+/// *before* the weights are touched. This is not politeness:
+///
+///  * The denoise loop derives its latent grid as `pixels / 32` and reshapes the
+///    pixel tensor back to `grid * 32` (32 = `Configuration.pixelsPerToken`,
+///    `patchSize / downsampleRatio` = 16 / 0.5), so a size that is not a multiple of 32
+///    makes the two disagree and MLX calls `fatalError` — measured on 1000x1000:
+///    `Fatal error: [reshape] Cannot reshape array of size 3000000 into shape
+///    (1,3,31,32,31,32)`. A fatal error cannot be caught, so the whole **daemon**
+///    dies: the client sees an empty response, and every other client of the shared
+///    service loses its resident model with it. Refusing up front is the only way
+///    to keep one malformed request from taking the service down.
+///  * A negative seed traps the same way (`UInt64(-1)`), and `steps = 0` walks the
+///    loop zero times and hands back an un-denoised tensor.
+///
+/// The same checks run for a raw socket client as for the MCP front end, so the
+/// rules hold no matter what is on the other end of the socket.
+enum RequestError {
+    static func bad(_ message: String) -> NSError {
+        NSError(domain: "sensenova", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+/// JSON numbers arrive as `NSNumber`, and a client in Python or JavaScript can send
+/// `1000.0` where Swift would only match `Int`. Accept both, so a value is either
+/// understood or absent — never silently replaced by the default.
+func intArg(_ request: [String: Any], _ key: String) -> Int? {
+    if let n = request[key] as? Int { return n }
+    if let d = request[key] as? Double { return Int(d) }
+    if let n = request[key] as? NSNumber { return n.intValue }
+    return nil
+}
+
+func doubleArg(_ request: [String: Any], _ key: String) -> Double? {
+    if let d = request[key] as? Double { return d }
+    if let n = request[key] as? Int { return Double(n) }
+    if let n = request[key] as? NSNumber { return n.doubleValue }
+    return nil
+}
+
+/// A pixel dimension the model can actually render.
+func validatedSize(_ value: Int, _ axis: String) throws -> Int {
+    guard value > 0 else { throw RequestError.bad("\(axis) \(value) must be positive") }
+    guard value <= 4096 else {
+        throw RequestError.bad("\(axis) \(value) is above the supported maximum of 4096 pixels")
+    }
+    guard value % 32 == 0 else {
+        let down = (value / 32) * 32
+        let up = down + 32
+        let nearest = value - down <= up - value ? down : up
+        throw RequestError.bad("""
+        \(axis) \(value) is not a multiple of 32 — the latent grid is \(axis)/32, so \(value) \
+        would be reshaped to \(down) and MLX would abort the whole service (an uncatchable fatal \
+        error, not a failed request). Use \(nearest).
+        """)
+    }
+    return value
+}
+
+/// Validates an optional integer argument up front; `nil` means "use the default",
+/// which may depend on the artifact that ends up resident and is therefore resolved
+/// later. Rejecting a nonsense value here avoids loading 33 GiB to find out.
+func validatedOptionalInt(_ request: [String: Any], _ key: String,
+                          range: ClosedRange<Int>) throws -> Int? {
+    guard let value = intArg(request, key) else { return nil }
+    guard range.contains(value) else {
+        throw RequestError.bad("\(key) \(value) is outside the supported range "
+            + "\(range.lowerBound)...\(range.upperBound)")
+    }
+    return value
+}
+
+/// The seed, plus whether the caller pinned it — a sidecar that says "random" is
+/// how a run repeated from scratch is told apart from one that merely looks alike.
+func validatedSeed(_ request: [String: Any]) throws -> (seed: UInt64, explicit: Bool) {
+    guard let raw = intArg(request, "seed") else {
+        return (UInt64(Int.random(in: 1...2_000_000)), false)
+    }
+    guard raw >= 0 else {
+        throw RequestError.bad("seed \(raw) is negative — seeds are unsigned integers (0...\(Int.max))")
+    }
+    return (UInt64(raw), true)
+}
+
+// MARK: - status snapshot
+
+/// A lock-protected copy of everything `status` reports, published by the actor
+/// whenever its state changes.
+///
+/// It exists because the `Core` actor is **not** re-entrant across the generation
+/// call: `t2iGenerate` is one long synchronous call, so while a job runs the actor's
+/// executor is held and any other request queues behind it. Measured: a `status`
+/// request issued during a 1536x1024 job came back after 75.3 s — the length of the
+/// generation — so `model_status`, the tool an agent uses to ask "are you busy?",
+/// answered only once the answer had stopped mattering, and `unload`'s "busy" reply
+/// could not be observed at all. Read-only commands now answer from this snapshot on
+/// the connection thread, without touching the actor.
+final class StatusBoard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var state: [String: Any] = [:]
+
+    func publish(_ values: [String: Any]) {
+        lock.lock(); defer { lock.unlock() }
+        for (key, value) in values { state[key] = value }
+    }
+
+    func clear(_ key: String) {
+        lock.lock(); state.removeValue(forKey: key); lock.unlock()
+    }
+
+    func snapshot() -> [String: Any] {
+        lock.lock(); defer { lock.unlock() }
+        return state
+    }
+}
+
+let statusBoard = StatusBoard()
+
+// MARK: - live progress
+
+/// Step counter for the job in flight, so `status` can answer "step 23 of 50,
+/// 18.4s in" instead of just "busy". The denoise callback runs on another thread,
+/// hence the lock. Opt-in progress *messages* on the socket were deliberately not
+/// added: a client that reads one line per request (the documented two-line
+/// integration) would misparse them.
+final class JobProgress: @unchecked Sendable {
+    private let lock = NSLock()
+    /// Mirrors every change into `status`; a job can run for a minute, and the board
+    /// is the only thing a client can read while the actor is busy.
+    private let board: StatusBoard
+    private var tool: String?
+    private var step = 0
+    private var total = 0
+    private var startedAt: Date?
+
+    init(board: StatusBoard) { self.board = board }
+
+    func begin(_ tool: String, total: Int) {
+        lock.lock(); defer { lock.unlock() }
+        self.tool = tool
+        self.step = 0
+        self.total = total
+        self.startedAt = Date()
+        board.publish(["current": currentLocked() ?? [:]])
+    }
+
+    func advance(_ step: Int) {
+        lock.lock(); self.step = step; lock.unlock()
+        if let current = snapshot() { board.publish(["current": current]) }
+    }
+
+    func end() {
+        lock.lock(); defer { lock.unlock() }
+        tool = nil
+        step = 0
+        total = 0
+        startedAt = nil
+        board.clear("current")
+    }
+
+    func snapshot() -> [String: Any]? {
+        lock.lock(); defer { lock.unlock() }
+        return currentLocked()
+    }
+
+    private func currentLocked() -> [String: Any]? {
+        guard let tool, let startedAt else { return nil }
+        var out: [String: Any] = [
+            "tool": tool,
+            "step": step,
+            "total": total,
+            "elapsed_seconds": (Date().timeIntervalSince(startedAt) * 10).rounded() / 10,
+        ]
+        if total > 0 { out["percent"] = Int((Double(step) / Double(total) * 100).rounded()) }
+        return out
+    }
+}
+
+let jobProgress = JobProgress(board: statusBoard)
+
+/// The capability report. Static facts plus what this machine has, so a client can
+/// stop discovering the rules by firing requests and reading the rejections — and,
+/// before the size check existed, the answer to a size the model cannot render was
+/// the daemon dying.
+func optionsReport() -> [String: Any] {
+    let resident = statusBoard.snapshot()["resident_tier"] as? String ?? "cold"
+    var available: [String] = []
+    for tier in tierNames where artifactReady(tier) { available.append(tier) }
+    return ["ok": true, "options": [
+        "protocol": protocolVersion,
+        "project_version": projectVersion,
+        "commands": ["generate", "edit", "vqa", "status", "options", "unload"],
+        "sizes": [
+            "rule": "width and height must be multiples of 32 (pixelsPerToken = patchSize / downsampleRatio = 16 / 0.5)",
+            "minimum": 32,
+            "maximum": 4096,
+            "recommended": [
+                ["label": "square 1:1", "width": 1024, "height": 1024],
+                ["label": "landscape 3:2", "width": 1216, "height": 832],
+                ["label": "landscape 16:9", "width": 1600, "height": 896],
+                ["label": "portrait 9:16", "width": 896, "height": 1600],
+            ],
+            "note": "bigger is slower; 1024x1024 is the reference point for comparisons",
+        ],
+        "steps": [
+            "minimum": 1, "maximum": 500,
+            "fast_default": 8, "quality_default": 50,
+            "note": "omit to use the recipe of the artifact that runs; a value of 12 or less also selects the fast tier when tier is omitted",
+        ],
+        "cfg": [
+            "fast_default": 1.0, "quality_default": 4.0,
+            "note": "1.0 or below skips the unconditional branch, so negative is ignored at that setting",
+        ],
+        "seed": [
+            "type": "unsigned integer",
+            "note": "same seed, same artifact, same settings = byte-identical PNG (measured)",
+            "default": "random in 1...2000000, recorded in the sidecar and in the file name",
+        ],
+        "negative_prompt": [
+            "generate": true,
+            "edit": false,
+            "note": "generate only: the edit surface has no unconditional branch, so edit_image rejects a non-empty negative instead of ignoring it",
+        ],
+        "sidecar": [
+            "enabled": sidecarEnabled,
+            "path": "<image>.png.json",
+            "fields": "prompt + sha256, negative, seed + whether it was pinned, width, height, steps, cfg, tier, artifact, seconds, peak memory, project version",
+        ],
+        "cancellation": [
+            "supported": false,
+            "note": "a dispatched request runs to completion and its PNG lands even if the client goes away; there is no cancel command",
+        ],
+        "tiers": [
+            "available": available,
+            "resident": resident,
+            "note": "a requested tier that is not installed is served by the installed one, at that artifact's own recipe",
+        ],
+        "output_dir": outDir.path,
+    ]]
+}
+
+/// Commands answered without entering the actor. `unload` is included only for its
+/// "busy" case: unloading for real needs the actor, so when nothing is running this
+/// returns nil and the request goes the normal way.
+func immediateAnswer(_ request: [String: Any]) -> [String: Any]? {
+    switch (request["cmd"] as? String) ?? "" {
+    case "status":
+        return ["ok": true, "status": statusBoard.snapshot()]
+    case "options":
+        return optionsReport()
+    case "unload":
+        if let inflight = statusBoard.snapshot()["inflight"] as? Int, inflight > 0 {
+            return ["ok": false, "error": "busy"]
+        }
+        return nil
+    default:
+        return nil
+    }
+}
+
+// MARK: - sidecar metadata
+
+/// Every image gets a `<name>.png.json` beside it carrying the prompt verbatim and
+/// its SHA-256, the seed and whether it was pinned, the size, the steps and cfg that
+/// actually ran, the artifact that produced it, the wall time and the project
+/// version. Without it two runs cannot be told apart afterwards: the file name
+/// carries only the tier and the seed, and the log carries neither the prompt nor
+/// the cfg, so "same prompt, same seed, different model" — the comparison this
+/// service exists to make possible — could only be asserted from memory.
+///
+/// `"write_sidecar": false` in config.json (or `SENSENOVA_SIDECAR=0`) turns it off.
+let sidecarEnabled = (environmentForConfig["SENSENOVA_SIDECAR"].map { $0 != "0" })
+    ?? (serviceConfig.writeSidecar ?? true)
+
+func sha256Hex(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+func sha256Hex(file path: String) -> String? {
+    (try? Data(contentsOf: URL(fileURLWithPath: path))).map(sha256Hex)
+}
+
+@discardableResult
+func writeSidecar(for image: URL, fields: [String: Any]) -> URL? {
+    guard sidecarEnabled else { return nil }
+    var payload = fields
+    payload["image"] = image.lastPathComponent
+    payload["created_at"] = ISO8601DateFormatter().string(from: Date())
+    payload["project_version"] = projectVersion
+    payload["protocol"] = protocolVersion
+    guard let data = try? JSONSerialization.data(
+        withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else { return nil }
+    let url = image.appendingPathExtension("json")
+    do {
+        try data.write(to: url)
+        return url
+    } catch {
+        log("could not write \(url.path): \(error)")
+        return nil
+    }
+}
+
 // MARK: - PNG output (NCHW float32 in -1..1 -> 8-bit RGB PNG)
 
 enum OutputError: Error { case badShape([Int]), encodeFailed(String) }
@@ -195,7 +530,11 @@ actor Core {
     /// instead of each starting their own (the actor is re-entrant at awaits).
     private var pendingLoad: (tier: String, task: Task<Resident, Error>)?
 
-    func status() -> [String: Any] {
+    /// Publishes the current state to `statusBoard` and returns it. Called on every
+    /// transition — job start and finish, load, unload, idle unload — so the
+    /// read-only fast path in `immediateAnswer` is never stale.
+    @discardableResult
+    func publish() -> [String: Any] {
         var available: [String] = []
         for tier in tierNames where artifactReady(tier) { available.append(tier) }
         var out: [String: Any] = [
@@ -207,11 +546,19 @@ actor Core {
             "ttl_seconds": ttlSeconds,
             "min_warm_seconds": minWarmSeconds,
             "last_peak_mb": lastPeakMB,
+            "protocol": protocolVersion,
+            "project_version": projectVersion,
         ]
         if let d = lastUseAt { out["last_request_at"] = ISO8601DateFormatter().string(from: d) }
         if let d = loadedAt { out["loaded_at"] = ISO8601DateFormatter().string(from: d) }
-        return out
+        statusBoard.publish(out)
+        if let current = jobProgress.snapshot() { statusBoard.publish(["current": current]) }
+        else { statusBoard.clear("current") }
+        return statusBoard.snapshot()
     }
+
+    /// In-actor view of the same state.
+    func status() -> [String: Any] { publish() }
 
     private func release() {
         model = nil
@@ -219,6 +566,7 @@ actor Core {
         residentTier = nil
         loadedAt = nil
         MLX.Memory.clearCache()
+        publish()
     }
 
     func unload() -> [String: Any] {
@@ -287,6 +635,7 @@ actor Core {
         lastUseAt = Date()
         loadsTotal += 1
         pendingLoad = nil
+        publish()
         log("loaded \(tier) in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s (loads_total=\(loadsTotal))")
         return resident
     }
@@ -294,6 +643,7 @@ actor Core {
     func handle(_ request: [String: Any]) async -> [String: Any] {
         let cmd = (request["cmd"] as? String) ?? ""
         if cmd == "status" { return ["ok": true, "status": status()] }
+        if cmd == "options" { return optionsReport() }
         if cmd == "unload" {
             guard inflight == 0 else { return ["ok": false, "error": "busy"] }
             return unload()
@@ -302,17 +652,19 @@ actor Core {
             return ["ok": false, "error": "unknown cmd '\(cmd)'"]
         }
 
-        let distilledFloor = request["steps"] as? Int ?? 50
+        let distilledFloor = intArg(request, "steps") ?? 50
         let tier = (request["tier"] as? String)
             ?? (cmd == "generate" && distilledFloor <= 12 ? "fast" : "quality")
         waiting += 1
         inflight += 1
         lastUseAt = Date()
+        publish()
         defer {
             waiting = max(0, waiting - 1)
             inflight = max(0, inflight - 1)
             lastUseAt = Date()
             lastPeakMB = MLX.Memory.peakMemory / (1 << 20)
+            publish()
         }
         do {
             switch cmd {
@@ -321,16 +673,33 @@ actor Core {
             default: return try await vqa(request, tier: tier)
             }
         } catch {
-            return ["ok": false, "error": String(describing: error)]
+            // localizedDescription, not the NSError dump: this text is what the client
+            // shows the user, and "Error Domain=... Code=1 UserInfo={...}" is not part
+            // of the message.
+            return ["ok": false, "error": (error as NSError).localizedDescription]
         }
     }
 
-    private func promptPair(_ tok: SenseNovaTokenizer, _ prompt: String, cfg: Float) -> ([Int32], [Int32]?) {
-        let pair = tok.t2iIDs(prompt: prompt)
+    private func promptPair(_ tok: SenseNovaTokenizer, _ prompt: String, _ negative: String,
+                            cfg: Float) -> ([Int32], [Int32]?) {
+        // The negative prompt *is* the unconditional branch of CFG on this
+        // architecture, so it is passed into the uncond encoding rather than being a
+        // separate knob. It only has an effect when cfg > 1, which is the quality
+        // recipe; the fast recipe runs cfg 1.0 and therefore has no uncond branch.
+        let pair = tok.t2iIDs(prompt: prompt, negativePrompt: negative)
         return (pair.cond, cfg > 1 ? pair.uncond : nil)
     }
 
     private func generate(_ request: [String: Any], tier: String) async throws -> [String: Any] {
+        // Validate before ensureLoaded: a request that cannot run must not pull 33 GiB
+        // of weights in first.
+        let prompt = request["prompt"] as? String ?? ""
+        guard !prompt.isEmpty else { throw RequestError.bad("prompt is required") }
+        let width = try validatedSize(intArg(request, "width") ?? 1024, "width")
+        let height = try validatedSize(intArg(request, "height") ?? 1024, "height")
+        let stepsArg = try validatedOptionalInt(request, "steps", range: 1...500)
+        let (seed, seedExplicit) = try validatedSeed(request)
+        let negative = (request["negative"] as? String) ?? ""
         let wanted = canonicalTier(tier)
         let resident = try await ensureLoaded(wanted)
         let m = resident.model
@@ -339,27 +708,65 @@ actor Core {
         // request the installed artifact cannot honour is served at that
         // artifact's own settings instead of being driven out of distribution.
         let distilled = resident.tier == "fast"
-        let prompt = request["prompt"] as? String ?? ""
         var p = T2IParams()
-        p.numSteps = request["steps"] as? Int ?? (distilled ? 8 : 50)
-        p.cfgScale = Float(request["cfg"] as? Double ?? (distilled ? 1.0 : 4.0))
-        p.seed = UInt64(request["seed"] as? Int ?? Int.random(in: 1...2_000_000))
-        let width = request["width"] as? Int ?? 1024
-        let height = request["height"] as? Int ?? 1024
-        let (cond, uncond) = promptPair(tok, prompt, cfg: p.cfgScale)
+        p.numSteps = stepsArg ?? (distilled ? 8 : 50)
+        p.cfgScale = Float(doubleArg(request, "cfg") ?? (distilled ? 1.0 : 4.0))
+        p.seed = seed
+        let (cond, uncond) = promptPair(tok, prompt, negative, cfg: p.cfgScale)
         let t0 = Date()
+        jobProgress.begin("generate", total: p.numSteps)
+        defer { jobProgress.end() }
         let image = try m.t2iGenerate(
-            condIds: cond, uncondIds: uncond, width: width, height: height, params: p)
+            condIds: cond, uncondIds: uncond, width: width, height: height, params: p,
+            onStep: { step, _ in jobProgress.advance(step) })
         eval(image)
         let seconds = Date().timeIntervalSince(t0)
         let url = try writeOutput(image, tag: distilled ? "fast\(p.numSteps)" : "t2i", seed: p.seed)
         var out: [String: Any] = [
             "ok": true, "path": url.path, "tier": resident.tier, "seed": Int(p.seed),
+            "seed_source": seedExplicit ? "explicit" : "random",
             "steps": p.numSteps, "cfg": Double(p.cfgScale), "width": width, "height": height,
             "seconds": (seconds * 100).rounded() / 100, "peak_mb": MLX.Memory.peakMemory / (1 << 20),
         ]
         if resident.tier != wanted { out["tier_requested"] = wanted }
+        if !negative.isEmpty { out["negative"] = negative }
+        if let sidecar = writeSidecar(for: url, fields: sidecarFields(
+            tool: "generate_image", prompt: prompt, negative: negative, seed: p.seed,
+            seedExplicit: seedExplicit, width: width, height: height, steps: p.numSteps,
+            cfg: Double(p.cfgScale), resident: resident, wanted: wanted, seconds: seconds)) {
+            out["metadata"] = sidecar.path
+        }
         return out
+    }
+
+    /// The shared sidecar payload. `seconds` is rounded the same way the response
+    /// rounds it, so the two records agree.
+    private func sidecarFields(tool: String, prompt: String, negative: String, seed: UInt64,
+                               seedExplicit: Bool, width: Int, height: Int, steps: Int, cfg: Double,
+                               resident: Resident, wanted: String, seconds: TimeInterval,
+                               extra: [String: Any] = [:]) -> [String: Any] {
+        let dir = artifactDir(resident.tier)
+        var fields: [String: Any] = [
+            "tool": tool,
+            "prompt": prompt,
+            "prompt_sha256": sha256Hex(Data(prompt.utf8)),
+            "negative": negative,
+            "negative_sha256": sha256Hex(Data(negative.utf8)),
+            "seed": Int(seed),
+            "seed_source": seedExplicit ? "explicit" : "random",
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "cfg": cfg,
+            "tier": resident.tier,
+            "tier_requested": wanted,
+            "artifact": dir.lastPathComponent,
+            "model_dir": dir.path,
+            "seconds": (seconds * 100).rounded() / 100,
+            "peak_mb": MLX.Memory.peakMemory / (1 << 20),
+        ]
+        for (key, value) in extra { fields[key] = value }
+        return fields
     }
 
     private func loadReferences(_ request: [String: Any]) throws -> [EditImage] {
@@ -372,43 +779,78 @@ actor Core {
     }
 
     private func edit(_ request: [String: Any], tier: String) async throws -> [String: Any] {
+        let prompt = request["prompt"] as? String ?? ""
+        guard !prompt.isEmpty else { throw RequestError.bad("prompt is required") }
+        if let negative = request["negative"] as? String, !negative.isEmpty {
+            throw RequestError.bad("""
+            negative is not supported on edit_image: the edit surface has no unconditional branch, \
+            so it would be silently ignored (the model package rejects it for the same reason). \
+            Say what must change and what must stay inside prompt.
+            """)
+        }
+        let stepsArg = try validatedOptionalInt(request, "steps", range: 1...500)
+        let (seed, seedExplicit) = try validatedSeed(request)
+        var widthArg = intArg(request, "width") ?? 0
+        var heightArg = intArg(request, "height") ?? 0
+        if widthArg != 0 { widthArg = try validatedSize(widthArg, "width") }
+        if heightArg != 0 { heightArg = try validatedSize(heightArg, "height") }
+        let targetPixels = intArg(request, "target_pixels") ?? (2048 * 2048)
+        guard targetPixels > 0 else {
+            throw RequestError.bad("target_pixels \(targetPixels) must be positive")
+        }
         let wanted = canonicalTier(tier)
         let resident = try await ensureLoaded(wanted)
         let m = resident.model
         let tok = resident.tokenizer
-        let prompt = request["prompt"] as? String ?? ""
         let images = try loadReferences(request)
         var p = T2IParams()
-        p.numSteps = request["steps"] as? Int ?? 50
-        p.cfgScale = Float(request["cfg"] as? Double ?? 4.0)
-        p.seed = UInt64(request["seed"] as? Int ?? Int.random(in: 1...2_000_000))
+        p.numSteps = stepsArg ?? 50
+        p.cfgScale = Float(doubleArg(request, "cfg") ?? 4.0)
+        p.seed = seed
         let counts = images.map(\.tokenCount)
-        var width = request["width"] as? Int ?? 0
-        var height = request["height"] as? Int ?? 0
+        var width = widthArg
+        var height = heightArg
         if width == 0 || height == 0 {
-            let target = request["target_pixels"] as? Int ?? (2048 * 2048)
             let (h, w) = SenseNovaImageIO.smartResize(
                 height: images[0].gridH * 16, width: images[0].gridW * 16, factor: 32,
-                minPixels: target, maxPixels: target)
+                minPixels: targetPixels, maxPixels: targetPixels)
             width = w
             height = h
         }
         let condIds = try tok.encode(Conversation.editCondPrompt(prompt, imageTokenCounts: counts))
         let imgCondIds = try tok.encode(Conversation.editImgCondPrompt(imageTokenCounts: counts))
         let t0 = Date()
+        jobProgress.begin("edit", total: p.numSteps)
+        defer { jobProgress.end() }
         let image = try m.it2iGenerate(
             condIds: condIds, imgCondIds: imgCondIds, uncondIds: nil, images: images,
             width: width, height: height, params: p,
-            imgCfgScale: Float(request["img_cfg"] as? Double ?? 1.0))
+            imgCfgScale: Float(doubleArg(request, "img_cfg") ?? 1.0),
+            onStep: { step, _ in jobProgress.advance(step) })
         eval(image)
         let seconds = Date().timeIntervalSince(t0)
         let url = try writeOutput(image, tag: "edit", seed: p.seed)
         var out: [String: Any] = [
             "ok": true, "path": url.path, "tier": resident.tier, "seed": Int(p.seed),
+            "seed_source": seedExplicit ? "explicit" : "random",
             "steps": p.numSteps, "cfg": Double(p.cfgScale), "width": width, "height": height,
             "seconds": (seconds * 100).rounded() / 100, "peak_mb": MLX.Memory.peakMemory / (1 << 20),
         ]
         if resident.tier != wanted { out["tier_requested"] = wanted }
+        // The reference images and their hashes belong in the record too: an edit is
+        // only reproducible together with the exact input it started from.
+        let references: [[String: Any]] = zip((request["images"] as? [String] ?? []), images).map { path, image in
+            var entry: [String: Any] = ["path": path, "sha256": sha256Hex(file: path) ?? ""]
+            entry["pixels"] = "\(image.gridW * 16)x\(image.gridH * 16)"
+            return entry
+        }
+        if let sidecar = writeSidecar(for: url, fields: sidecarFields(
+            tool: "edit_image", prompt: prompt, negative: "", seed: p.seed,
+            seedExplicit: seedExplicit, width: width, height: height, steps: p.numSteps,
+            cfg: Double(p.cfgScale), resident: resident, wanted: wanted, seconds: seconds,
+            extra: ["img_cfg": doubleArg(request, "img_cfg") ?? 1.0, "source_images": references])) {
+            out["metadata"] = sidecar.path
+        }
         return out
     }
 
@@ -509,6 +951,15 @@ func openListener(_ path: String) -> Int32? {
 }
 
 let core = Core()
+// Seed the status snapshot before the socket opens, so the very first `status` gets
+// a real answer instead of an empty object. Deliberately not top-level `await`: that
+// would make this whole file an async context, and the `RunLoop.main.run()` that
+// parks the daemon at the end is unavailable from one.
+do {
+    let seeded = DispatchSemaphore(value: 0)
+    Task { await core.publish(); seeded.signal() }
+    seeded.wait()
+}
 signal(SIGPIPE, SIG_IGN)
 try? FileManager.default.createDirectory(
     at: URL(fileURLWithPath: socketPath).deletingLastPathComponent(),
@@ -559,8 +1010,17 @@ final class Connection {
                     buffer.removeSubrange(buffer.startIndex...newline)
                     guard !line.isEmpty else { continue }
                     Task {
-                        let payload = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any]
-                        let response = await core.handle(payload ?? [:])
+                        let request = ((try? JSONSerialization.jsonObject(with: line)) as? [String: Any]) ?? [:]
+                        // `status`, `options` and a busy `unload` are answered here, on
+                        // the connection thread: during a generation the actor is held by
+                        // the model call and would not reply until it finished (see
+                        // StatusBoard). Everything that needs the model goes through it.
+                        let response: [String: Any]
+                        if let quick = immediateAnswer(request) {
+                            response = quick
+                        } else {
+                            response = await core.handle(request)
+                        }
                         guard let data = try? JSONSerialization.data(withJSONObject: response) else { return }
                         writeQueue.sync {
                             var out = data
