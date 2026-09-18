@@ -26,7 +26,7 @@ let socketPath = environment["SENSENOVA_SOCKET"]
         .appendingPathComponent("Library/Application Support/SenseNovaU1/served.sock").path
 let servedBinaryPath = environment["SENSENOVA_SERVED_BIN"]
     ?? URL(fileURLWithPath: homePath)
-        .appendingPathComponent("runtime/.build/release/sensenova-served").path
+        .appendingPathComponent("bin/sensenova-served").path
 
 let latestRevision = "2026-07-28"
 let legacyRevision = "2025-11-25"

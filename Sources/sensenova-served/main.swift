@@ -72,6 +72,15 @@ func writePNG(_ image: MLXArray, to url: URL) throws {
 
 // MARK: - the single owner of the weights
 
+/// The resident weights. MLX model objects are reference types that do not
+/// declare `Sendable`; the load task materializes them and hands them over
+/// once, after which only the actor touches them. `@unchecked` records exactly
+/// that hand-off instead of leaving a Swift 6 error for later.
+struct Resident: @unchecked Sendable {
+    let model: NEOChatModel
+    let tokenizer: SenseNovaTokenizer
+}
+
 actor Core {
     private var model: NEOChatModel?
     private var tokenizer: SenseNovaTokenizer?
@@ -84,7 +93,7 @@ actor Core {
     private var lastPeakMB = 0
     /// In-flight load, so concurrent callers await the same materialization
     /// instead of each starting their own (the actor is re-entrant at awaits).
-    private var pendingLoad: (tier: String, task: Task<(NEOChatModel, SenseNovaTokenizer), Error>)?
+    private var pendingLoad: (tier: String, task: Task<Resident, Error>)?
 
     func status() -> [String: Any] {
         var out: [String: Any] = [
@@ -106,7 +115,7 @@ actor Core {
         tokenizer = nil
         residentTier = nil
         loadedAt = nil
-        MLX.GPU.clearCache()
+        MLX.Memory.clearCache()
     }
 
     func unload() -> [String: Any] {
@@ -128,8 +137,10 @@ actor Core {
         }
     }
 
-    private func ensureLoaded(_ tier: String) async throws -> (NEOChatModel, SenseNovaTokenizer) {
-        if let m = model, let t = tokenizer, residentTier == tier { return (m, t) }
+    private func ensureLoaded(_ tier: String) async throws -> Resident {
+        if let m = model, let t = tokenizer, residentTier == tier {
+            return Resident(model: m, tokenizer: t)
+        }
         if let pending = pendingLoad {
             if pending.tier == tier { return try await pending.task.value }
             throw NSError(domain: "sensenova", code: 4, userInfo: [NSLocalizedDescriptionKey:
@@ -142,28 +153,28 @@ actor Core {
                 NSLocalizedDescriptionKey: "artifact missing: \(dir.path)"])
         }
         let t0 = Date()
-        let task = Task.detached(priority: .userInitiated) { () throws -> (NEOChatModel, SenseNovaTokenizer) in
+        let task = Task.detached(priority: .userInitiated) { () throws -> Resident in
             let m = try WeightLoading.loadArtifact(from: dir)
             let t = try await SenseNovaTokenizer.load(from: dir)
-            return (m, t)
+            return Resident(model: m, tokenizer: t)
         }
         pendingLoad = (tier, task)
-        let (m, t): (NEOChatModel, SenseNovaTokenizer)
+        let resident: Resident
         do {
-            (m, t) = try await task.value
+            resident = try await task.value
         } catch {
             pendingLoad = nil
             throw error
         }
-        model = m
-        tokenizer = t
+        model = resident.model
+        tokenizer = resident.tokenizer
         residentTier = tier
         loadedAt = Date()
         lastUseAt = Date()
         loadsTotal += 1
         pendingLoad = nil
         log("loaded \(tier) in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s (loads_total=\(loadsTotal))")
-        return (m, t)
+        return resident
     }
 
     func handle(_ request: [String: Any]) async -> [String: Any] {
@@ -187,7 +198,7 @@ actor Core {
             waiting = max(0, waiting - 1)
             inflight = max(0, inflight - 1)
             lastUseAt = Date()
-            lastPeakMB = GPU.peakMemory / (1 << 20)
+            lastPeakMB = MLX.Memory.peakMemory / (1 << 20)
         }
         do {
             switch cmd {
@@ -206,7 +217,9 @@ actor Core {
     }
 
     private func generate(_ request: [String: Any], tier: String) async throws -> [String: Any] {
-        let (m, tok) = try await ensureLoaded(tier)
+        let resident = try await ensureLoaded(tier)
+        let m = resident.model
+        let tok = resident.tokenizer
         let distilled = tier == "fast"
         let prompt = request["prompt"] as? String ?? ""
         var p = T2IParams()
@@ -225,7 +238,7 @@ actor Core {
         return [
             "ok": true, "path": url.path, "tier": tier, "seed": Int(p.seed),
             "steps": p.numSteps, "cfg": Double(p.cfgScale), "width": width, "height": height,
-            "seconds": (seconds * 100).rounded() / 100, "peak_mb": GPU.peakMemory / (1 << 20),
+            "seconds": (seconds * 100).rounded() / 100, "peak_mb": MLX.Memory.peakMemory / (1 << 20),
         ]
     }
 
@@ -239,7 +252,9 @@ actor Core {
     }
 
     private func edit(_ request: [String: Any], tier: String) async throws -> [String: Any] {
-        let (m, tok) = try await ensureLoaded(tier)
+        let resident = try await ensureLoaded(tier)
+        let m = resident.model
+        let tok = resident.tokenizer
         let prompt = request["prompt"] as? String ?? ""
         let images = try loadReferences(request)
         var p = T2IParams()
@@ -270,12 +285,14 @@ actor Core {
         return [
             "ok": true, "path": url.path, "tier": tier, "seed": Int(p.seed),
             "steps": p.numSteps, "cfg": Double(p.cfgScale), "width": width, "height": height,
-            "seconds": (seconds * 100).rounded() / 100, "peak_mb": GPU.peakMemory / (1 << 20),
+            "seconds": (seconds * 100).rounded() / 100, "peak_mb": MLX.Memory.peakMemory / (1 << 20),
         ]
     }
 
     private func vqa(_ request: [String: Any], tier: String) async throws -> [String: Any] {
-        let (m, tok) = try await ensureLoaded(tier)
+        let resident = try await ensureLoaded(tier)
+        let m = resident.model
+        let tok = resident.tokenizer
         let question = request["prompt"] as? String ?? ""
         let paths = request["images"] as? [String] ?? []
         let images: [EditImage] = paths.compactMap {
@@ -297,7 +314,7 @@ actor Core {
         let (text, reasoning) = Conversation.splitReasoning(tok.decode(answer))
         var out: [String: Any] = [
             "ok": true, "text": text, "tier": tier,
-            "seconds": (seconds * 100).rounded() / 100, "peak_mb": GPU.peakMemory / (1 << 20),
+            "seconds": (seconds * 100).rounded() / 100, "peak_mb": MLX.Memory.peakMemory / (1 << 20),
         ]
         if let reasoning { out["reasoning"] = reasoning }
         return out
@@ -384,7 +401,11 @@ final class Connection {
     }
 
     func start() {
-        let thread = Thread { [self] in
+        // Borrowed into locals so the closures below need no implicit `self`.
+        let fd = self.fd
+        let core = self.core
+        let writeQueue = self.writeQueue
+        let thread = Thread {
             var buffer = Data()
             var chunk = [UInt8](repeating: 0, count: 64 * 1024)
             while true {
@@ -395,7 +416,7 @@ final class Connection {
                     let line = buffer.subdata(in: buffer.startIndex..<newline)
                     buffer.removeSubrange(buffer.startIndex...newline)
                     guard !line.isEmpty else { continue }
-                    Task { [self] in
+                    Task {
                         let payload = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any]
                         let response = await core.handle(payload ?? [:])
                         guard let data = try? JSONSerialization.data(withJSONObject: response) else { return }

@@ -15,7 +15,7 @@
 | `Sources/sensenova-served/` | 守护进程：唯一持有权重，串行生成，空闲 TTL 卸载，socket 绑定即单实例互斥 |
 | `Sources/sensenova-mcp/` | stdio MCP 前端：无状态、不加载权重，把工具调用转成 socket 请求；连不上时按需拉起守护进程 |
 | `Package.swift` | 相对上游的两处改动：新增上述两个 executable target |
-| `scripts/deploy.sh` | 构建两个产物，并在已安装 LaunchAgent 时重启服务 |
+| `scripts/deploy.sh` | 构建两个产物、安装到 `$SENSENOVA_HOME/bin`，并在已安装 LaunchAgent 时重启服务 |
 
 ## 构建与运行
 
@@ -23,11 +23,14 @@
 swift build -c release --product sensenova-served
 swift build -c release --product sensenova-mcp
 
+# 或者一步到位：构建 + 安装到 $SENSENOVA_HOME/bin + 重启 LaunchAgent（若已安装）
+./scripts/deploy.sh
+
 # 守护进程（前台运行；正常由 launchd 或 MCP 前端拉起）
-SENSENOVA_HOME="$HOME/Models/SenseNova-U1.5" .build/release/sensenova-served
+SENSENOVA_HOME="$HOME/Models/SenseNova-U1.5" "$HOME/Models/SenseNova-U1.5/bin/sensenova-served"
 
 # 前端：stdio 上跑 MCP，日志走 stderr
-.build/release/sensenova-mcp
+"$HOME/Models/SenseNova-U1.5/bin/sensenova-mcp"
 ```
 
 环境变量（都有默认值，见两个 `main.swift` 顶部）：
@@ -36,7 +39,7 @@ SENSENOVA_HOME="$HOME/Models/SenseNova-U1.5" .build/release/sensenova-served
 |---|---|---|
 | `SENSENOVA_HOME` | `~/Models/SenseNova-U1.5` | 权重、制品与出图目录 |
 | `SENSENOVA_SOCKET` | `~/Library/Application Support/SenseNovaU1/served.sock` | 守护进程监听路径，同时是单实例互斥锁 |
-| `SENSENOVA_SERVED_BIN` | `$SENSENOVA_HOME/runtime/.build/release/sensenova-served` | 前端自拉守护进程时用的可执行文件 |
+| `SENSENOVA_SERVED_BIN` | `$SENSENOVA_HOME/bin/sensenova-served` | 前端自拉守护进程时用的可执行文件 |
 | `SENSENOVA_TTL_SECONDS` | `600` | 空闲多久卸载权重 |
 | `SENSENOVA_MIN_WARM_SECONDS` | `60` | 出图后最短保温时间 |
 
