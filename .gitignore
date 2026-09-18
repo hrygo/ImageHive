@@ -1,3 +1,8 @@
 .build/
 .DS_Store
+__pycache__/
+*.pyc
 *.xcodeproj
+dist/
+prebuilt/
+*.bak-*

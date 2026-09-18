@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# Model artifact presets, download and verification. Sourced, not run.
+#
+# Artifacts are the ready-to-run MLX conversions published by the upstream
+# project. They already contain tokenizer.json, so a fresh install needs no
+# Python, no conversion step and no Hugging Face login.
+
+# name|repo|tier|disk|peak|note
+SV_PRESETS=(
+  "fast-4bit|mlx-community/SenseNova-U1.5-8B-MoT-8step-4bit|fast|11 GiB|14.8 GB|8-step distilled, 4-bit — the default: fastest, smallest"
+  "fast-8bit|mlx-community/SenseNova-U1.5-8B-MoT-8step-8bit|fast|20 GiB|22.4 GB|8-step distilled, 8-bit — closest to the bf16 draw of the fast tier"
+  "quality-bf16|mlx-community/SenseNova-U1.5-8B-MoT-bf16|quality|33 GiB|35.1 GB|50-step reference tier, also the tier used for editing and VQA"
+)
+
+sv_preset_names() {
+  local entry
+  for entry in "${SV_PRESETS[@]}"; do printf '%s\n' "${entry%%|*}"; done
+}
+
+sv_preset_entry() {
+  local wanted="$1" entry
+  for entry in "${SV_PRESETS[@]}"; do
+    [ "${entry%%|*}" = "$wanted" ] && { printf '%s\n' "$entry"; return 0; }
+  done
+  return 1
+}
+
+sv_preset_field() { # <preset> <1 repo|2 tier|3 disk|4 peak|5 note>
+  local entry; entry="$(sv_preset_entry "$1")" || return 1
+  printf '%s\n' "$entry" | awk -F'|' -v n="$2" '{print $n}'
+}
+
+sv_preset_repo() { sv_preset_field "$1" 2; }
+sv_preset_tier() { sv_preset_field "$1" 3; }
+
+sv_preset_dir() { # absolute artifact directory for a preset
+  printf '%s\n' "$(sv_home)/artifacts/$(sv_preset_repo "$1" | tr '/' '-')"
+}
+
+sv_require_python() {
+  sv_have python3 || die "python3 is required for model downloads (install Xcode Command Line Tools: xcode-select --install)"
+}
+
+# --- source listing ----------------------------------------------------------
+#
+# Every listing prints "size<TAB>path" lines, skipping .gitattributes and the
+# repo README (harmless but not part of the artifact).
+
+sv_list_modelscope() {
+  local repo="$1" json
+  json="$(curl -fsSL "https://modelscope.cn/api/v1/models/${repo}/repo/files?Revision=master&Recursive=true")" \
+    || die "could not list ${repo} on ModelScope"
+  printf '%s' "$json" | python3 -c '
+import json, sys
+for f in json.load(sys.stdin)["Data"]["Files"]:
+    path, size = f["Path"], f.get("Size", 0)
+    if path.endswith(".gitattributes") or path.endswith("README.md"):
+        continue
+    print(f"{size}\t{path}")
+'
+}
+
+sv_list_hf() {
+  local repo="$1" endpoint="${2:-https://huggingface.co}" json
+  json="$(curl -fsSL "${endpoint}/api/models/${repo}?blobs=true")" \
+    || die "could not list ${repo} at ${endpoint}"
+  printf '%s' "$json" | python3 -c '
+import json, sys
+for f in json.load(sys.stdin).get("siblings", []):
+    path = f["rfilename"]
+    if path.endswith(".gitattributes") or path.endswith("README.md"):
+        continue
+    print(f"{f.get('size', 0)}\t{path}")
+'
+}
+
+sv_list_files() { # <repo> <source>
+  case "$2" in
+    modelscope) sv_list_modelscope "$1" ;;
+    hf)         sv_list_hf "$1" "${HF_ENDPOINT:-https://huggingface.co}" ;;
+    *)          die "unknown source: $2" ;;
+  esac
+}
+
+sv_file_url() { # <repo> <path> <source>
+  case "$3" in
+    modelscope)
+      python3 -c '
+import sys, urllib.parse
+repo, path = sys.argv[1], sys.argv[2]
+print(f"https://modelscope.cn/api/v1/models/{repo}/repo?Revision=master&FilePath={urllib.parse.quote(path)}")
+' "$1" "$2"
+      ;;
+    hf)
+      printf '%s/%s/resolve/main/%s\n' "${HF_ENDPOINT:-https://huggingface.co}" "$1" "$2"
+      ;;
+  esac
+}
+
+# --- artifact state ----------------------------------------------------------
+
+sv_model_ready() { # <dir> — a complete artifact we can hand to the daemon
+  local dir="$1"
+  [ -f "$dir/config.json" ] || return 1
+  [ -f "$dir/tokenizer.json" ] || return 1
+  [ -f "$dir/.manifest" ] || return 1
+  return 0
+}
+
+sv_model_note() { # <dir>
+  printf '%s\n' "$(cat "$1/.manifest" 2>/dev/null | awk -F= '$1=="repo"{print $2}')"
+}
+
+# --- download ----------------------------------------------------------------
+
+sv_fetch_one() { # <url> <dest> <expected-size> <logfile>
+  local url="$1" dest="$2" size="$3" log="$4" tmp="${2}.part"
+  mkdir -p "$(dirname "$dest")"
+  if [ -f "$dest" ] && [ "$(stat -f%z "$dest" 2>/dev/null || echo 0)" = "$size" ]; then
+    printf 'cached  %s\n' "$(basename "$dest")" >> "$log"
+    return 0
+  fi
+  curl -fL --retry 5 --retry-delay 3 --retry-connrefused -C - \
+    --connect-timeout 20 -o "$tmp" "$url" 2>>"$log" || return 1
+  local got; got="$(stat -f%z "$tmp" 2>/dev/null || echo 0)"
+  if [ "$size" != "0" ] && [ "$got" != "$size" ]; then
+    printf 'size mismatch for %s: got %s want %s\n' "$(basename "$dest")" "$got" "$size" >> "$log"
+    return 1
+  fi
+  mv "$tmp" "$dest"
+  printf 'fetched %s\n' "$(basename "$dest")" >> "$log"
+}
+
+# sv_download_preset <preset> [source] [jobs]
+sv_download_preset() {
+  local preset="$1" source="${2:-auto}" jobs="${3:-3}"
+  local repo dir
+  repo="$(sv_preset_repo "$preset")" || die "unknown preset: $preset"
+  dir="$(sv_preset_dir "$preset")"
+  sv_require_python
+
+  if sv_model_ready "$dir"; then
+    hint "already installed: $preset ($(sv_dir_size "$dir"))"
+    return 0
+  fi
+
+  local listing=""
+  if [ "$source" = "auto" ] || [ "$source" = "modelscope" ]; then
+    step "listing ${repo} on ModelScope"
+    if listing="$(sv_list_modelscope "$repo" 2>/dev/null)" && [ -n "$listing" ]; then
+      source="modelscope"
+    else
+      [ "$source" = "modelscope" ] && die "ModelScope has no ${repo}"
+      hint "ModelScope listing failed, falling back to Hugging Face"
+    fi
+  fi
+  if [ -z "$listing" ]; then
+    source="hf"
+    step "listing ${repo} on ${HF_ENDPOINT:-https://huggingface.co}"
+    listing="$(sv_list_hf "$repo" "${HF_ENDPOINT:-https://huggingface.co}")"
+  fi
+
+  local count total_bytes
+  count="$(printf '%s\n' "$listing" | grep -c . || true)"
+  total_bytes="$(printf '%s\n' "$listing" | awk -F'\t' '{s+=$1} END{print s+0}')"
+  say "$(printf '%s' "$listing" | awk -F'\t' '{printf "  %12d  %s\n", $1, $2}' | head -20)"
+  say "  ${count} files, $(python3 -c "print(f'{$total_bytes/1073741824:.1f} GiB')") from ${source}"
+
+  mkdir -p "$dir"
+  local log; log="$(mktemp)"
+  local failed=0 group=0
+  while IFS=$'\t' read -r size path; do
+    [ -n "$path" ] || continue
+    sv_fetch_one "$(sv_file_url "$repo" "$path" "$source")" "$dir/$path" "$size" "$log" &
+    group=$((group + 1))
+    if [ "$group" -ge "$jobs" ]; then
+      wait
+      grep -q 'failed\|mismatch' "$log" 2>/dev/null && failed=1
+      group=0
+    fi
+  done <<< "$listing"
+  wait
+
+  local bad
+  bad="$(grep -c 'mismatch' "$log" 2>/dev/null || true)"
+  grep -q 'mismatch' "$log" 2>/dev/null && failed=1
+  tail -20 "$log" >&2
+  rm -f "$log"
+  [ "$failed" = "0" ] || die "download failed (${bad} size mismatches) — re-run to resume"
+
+  printf 'repo=%s\nsource=%s\nrevision=%s\n' "$repo" "$source" "master" > "$dir/.manifest"
+  printf '%s\n' "$listing" | awk -F'\t' '{printf "size=%s\tpath=%s\n", $1, $2}' >> "$dir/.manifest"
+  say "installed ${preset} -> ${dir} ($(sv_dir_size "$dir"))"
+}
+
+# sv_verify_preset <preset> — sizes on disk vs what the manifest recorded
+sv_verify_preset() {
+  local dir; dir="$(sv_preset_dir "$1")"
+  sv_model_ready "$dir" || { warn "not installed: $1"; return 1; }
+  local bad=0
+  while IFS=$'\t' read -r spec path; do
+    local want="${spec#size=}" got
+    got="$(stat -f%z "$dir/$path" 2>/dev/null || echo 0)"
+    [ "$got" = "$want" ] || { warn "size mismatch: $path (disk $got, expected $want)"; bad=1; }
+  done < <(grep '^size=' "$dir/.manifest")
+  [ "$bad" = "0" ] || return 1
+  return 0
+}

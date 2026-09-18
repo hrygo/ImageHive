@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# sensenova-u1 — manage the local SenseNova-U1.5 image service.
+#
+#   sensenova-u1 status            what the daemon is doing right now
+#   sensenova-u1 doctor            check every moving part, exit 1 if broken
+#   sensenova-u1 models            which artifacts are installed
+#   sensenova-u1 models pull NAME  download an artifact (ModelScope first)
+#   sensenova-u1 clients           which MCP clients are wired
+#   sensenova-u1 clients add X     wire a client (or `auto` for all detected)
+#   sensenova-u1 start|stop|restart|logs|unload|config|paths|generate
+
+set -euo pipefail
+
+# The installed command is a symlink into ~/.local/share/sensenova-u1, so resolve
+# the real location before looking for cli/lib next to it.
+sv_self_dir() {
+  local src="${BASH_SOURCE[0]}" target
+  while [ -L "$src" ]; do
+    target="$(readlink "$src")"
+    case "$target" in
+      /*) src="$target" ;;
+      *)  src="$(cd "$(dirname "$src")" && pwd)/$target" ;;
+    esac
+  done
+  printf '%s\n' "$(cd "$(dirname "$src")" && pwd)"
+}
+SV_LIB_DIR="$(sv_self_dir)/lib"
+# shellcheck source=lib/common.sh
+. "$SV_LIB_DIR/common.sh"
+# shellcheck source=lib/models.sh
+. "$SV_LIB_DIR/models.sh"
+# shellcheck source=lib/clients.sh
+. "$SV_LIB_DIR/clients.sh"
+
+sv_load_conf
+
+usage() {
+  sed -n '3,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+cmd_status() {
+  local label; label="$(sv_label)"
+  say "service:  $label"
+  if sv_service_loaded; then
+    # "not running" is normal: one daemon serves every client, and whichever
+    # front end needed it first owns it. Only the socket matters.
+    local state; state="$(launchctl print "gui/$(id -u)/$label" 2>/dev/null | awk -F'= ' '/^\tstate = /{print $2; exit}')"
+    case "$state" in
+      "not running") say "launchd:  loaded (idle — a daemon is started on demand when needed)" ;;
+      "")            say "launchd:  loaded" ;;
+      *)             say "launchd:  loaded ($state)" ;;
+    esac
+  else
+    say "launchd:  not loaded (the MCP front end starts the daemon on demand)"
+  fi
+  say "socket:   $(sv_socket)"
+  say "home:     $(sv_home)"
+  say "log:      $(sv_log)"
+  if ! [ -x "$(sv_mcp)" ]; then
+    say "state:    not installed — run install.sh"
+    return 1
+  fi
+  say ""
+  sv_status | sed 's/^/  /'
+}
+
+cmd_doctor() {
+  local problems=0
+  check() { # <ok|warn|fail> <label> <detail>
+    case "$1" in
+      ok)   printf '  %s✓%s %s\n' "$SV_GREEN" "$SV_RESET" "$2" ;;
+      warn) printf '  %s!%s %s\n' "$SV_YELLOW" "$SV_RESET" "$2"; [ -n "${3:-}" ] && hint "     $3" ;;
+      fail) printf '  %s✗%s %s\n' "$SV_RED" "$SV_RESET" "$2"; [ -n "${3:-}" ] && hint "     $3"; problems=$((problems + 1)) ;;
+    esac
+  }
+
+  say "host"
+  [ "$(sv_host_arch)" = "arm64" ] \
+    && check ok "Apple silicon ($(sv_host_arch))" \
+    || check fail "Apple silicon required (found $(sv_host_arch))" "MLX only runs on M1 or newer"
+  local macos; macos="$(sv_macos)"
+  case "$macos" in
+    2[6-9].*|[3-9][0-9].*) check ok "macOS $macos" ;;
+    *) check fail "macOS $macos is too old" "the package targets macOS 26+" ;;
+  esac
+  local ram; ram="$(sv_host_ram_gb)"
+  if [ "$ram" -ge 32 ]; then check ok "unified memory ${ram}GB"
+  elif [ "$ram" -ge 18 ]; then check warn "unified memory ${ram}GB" "the 4-bit tier peaks at ~15GB; close other apps and expect swaps"
+  else check fail "unified memory ${ram}GB is too small" "the smallest artifact peaks at ~15GB"; fi
+
+  say "install"
+  [ -f "$(sv_conf)" ] && check ok "service.conf" || check warn "service.conf missing" "re-run install.sh"
+  [ -x "$(sv_served)" ] && check ok "sensenova-served" || check fail "sensenova-served missing" "run install.sh"
+  [ -x "$(sv_mcp)" ] && check ok "sensenova-mcp" || check fail "sensenova-mcp missing" "run install.sh"
+  local bundle count
+  count="$(ls -d "$(sv_bin_dir)"/*.bundle 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$count" -ge 1 ] \
+    && check ok "MLX resource bundles ($count)" \
+    || check fail "MLX resource bundles missing" "the daemon dies on the first generation — re-run install.sh"
+
+  say "tiers in use"
+  local tier dir
+  for tier in fast quality; do
+    dir="$(sv_artifact_dir "$tier")"
+    if [ -f "$dir/config.json" ] && [ -f "$dir/tokenizer.json" ]; then
+      check ok "$tier -> $(basename "$dir") ($(sv_dir_size "$dir"))"
+    elif [ "$tier" = "fast" ]; then
+      check fail "fast tier artifact missing: $dir" "sensenova-u1 models pull fast-4bit"
+    else
+      check warn "quality tier artifact missing: $dir" "editing, VQA and 50-step quality need it"
+    fi
+  done
+  say "downloaded presets"
+  local preset any=0
+  for preset in $(sv_preset_names); do
+    dir="$(sv_preset_dir "$preset")"
+    [ -d "$dir" ] || continue
+    any=1
+    if sv_model_ready "$dir"; then check ok "$preset ($(sv_dir_size "$dir"))"
+    else check warn "$preset is incomplete" "sensenova-u1 models pull $preset (resumes)"; fi
+  done
+  [ "$any" = "1" ] || hint "     none yet; artifacts you built yourself are fine too"
+
+  say "service"
+  if sv_service_loaded; then
+    check ok "launchd job loaded"
+  else
+    check warn "launchd job not loaded" "install.sh loads it; the front end also starts it on demand"
+  fi
+  if [ -x "$(sv_mcp)" ] && sv_status >/dev/null 2>&1; then
+    check ok "daemon answering ($(sv_resident) / peak $(sv_peak_mb)MB)"
+  elif [ -x "$(sv_mcp)" ]; then
+    check fail "daemon not answering" "check $(sv_log)"
+  fi
+
+  say "clients"
+  local wired=0 client
+  for client in $(sv_clients_detected); do
+    if sv_client_has "$client"; then check ok "$client wired"; wired=$((wired + 1))
+    else check warn "$client detected but not wired" "sensenova-u1 clients add $client"; fi
+  done
+  [ "$wired" -gt 0 ] || check warn "no client wired yet" "sensenova-u1 clients add auto"
+
+  say ""
+  if [ "$problems" -eq 0 ]; then
+    say "everything checks out."
+  else
+    say "$problems problem(s) found."
+  fi
+  return "$problems"
+}
+
+cmd_models() {
+  local action="${1:-list}"; shift || true
+  case "$action" in
+    list|"")
+      printf '%-14s %-11s %-12s %s\n' PRESET TIER INSTALLED NOTE
+      local preset dir size tier note
+      for preset in $(sv_preset_names); do
+        dir="$(sv_preset_dir "$preset")"
+        tier="$(sv_preset_tier "$preset")"
+        note="$(sv_preset_field "$preset" 5)"
+        if sv_model_ready "$dir"; then size="$(sv_dir_size "$dir")"; else size="-"; fi
+        printf '%-14s %-11s %-12s %s\n' "$preset" "$tier" "$size" "$note"
+      done
+      say ""
+      local tier dir
+      for tier in fast quality; do
+        dir="$(sv_artifact_dir "$tier")"
+        if [ -f "$dir/config.json" ]; then
+          say "$tier tier    -> $dir ($(sv_dir_size "$dir"))"
+        else
+          say "$tier tier    -> $dir (missing)"
+        fi
+      done
+      ;;
+    pull)
+      local what="${1:-}" source="${2:-auto}"
+      [ -n "$what" ] || die "usage: sensenova-u1 models pull <preset|all> [modelscope|hf]"
+      if [ "$what" = "all" ]; then
+        local preset
+        for preset in $(sv_preset_names); do sv_download_preset "$preset" "$source"; done
+      else
+        sv_download_preset "$what" "$source"
+      fi
+      ;;
+    verify)
+      local preset rc=0
+      for preset in $(sv_preset_names); do
+        sv_model_ready "$(sv_preset_dir "$preset")" || continue
+        if sv_verify_preset "$preset"; then say "ok: $preset"; else warn "damaged: $preset"; rc=1; fi
+      done
+      return "$rc"
+      ;;
+    *) die "usage: sensenova-u1 models [list|pull|verify]" ;;
+  esac
+}
+
+cmd_clients() {
+  local action="${1:-list}"; shift || true
+  case "$action" in
+    list|"")
+      local name
+      for name in $(sv_client_list); do
+        local mark=" "
+        sv_client_detect "$name" && mark="•" || mark=" "
+        if sv_client_has "$name" 2>/dev/null; then
+          printf '%s %-15s wired\n' "$mark" "$name"
+        elif sv_client_detect "$name"; then
+          printf '%s %-15s detected, not wired\n' "$mark" "$name"
+        else
+          printf '%s %-15s not installed\n' "$mark" "$name"
+        fi
+      done
+      say ""
+      hint "• = client detected on this machine; wire one with: sensenova-u1 clients add <name>"
+      ;;
+    add)
+      local what="${1:-auto}"
+      if [ "$what" = "auto" ]; then
+        local any=0 failed=0 name
+        for name in $(sv_clients_detected); do
+          any=1
+          sv_client_try "$name" || { warn "could not wire $name"; failed=$((failed + 1)); }
+        done
+        if [ "$any" = "0" ]; then warn "no known client detected"; sv_print_snippet; fi
+        [ "$failed" = "0" ] || return 1
+      elif [ "$what" = "generic" ]; then
+        sv_print_snippet
+      else
+        sv_client_add "$what"
+      fi
+      ;;
+    remove)
+      local what="${1:-}"; [ -n "$what" ] || die "usage: sensenova-u1 clients remove <name>"
+      sv_client_remove "$what"
+      ;;
+    snippet) sv_print_snippet ;;
+    *) die "usage: sensenova-u1 clients [list|add|remove|snippet]" ;;
+  esac
+}
+
+cmd_config() {
+  local action="${1:-show}"
+  case "$action" in
+    show)
+      say "file: $(sv_conf)"
+      say "SENSENOVA_HOME=$(sv_home)"
+      say "SENSENOVA_PREFIX=$(sv_prefix)"
+      say "SENSENOVA_LABEL=$(sv_label)"
+      say "SENSENOVA_SOCKET=$(sv_socket)"
+      say "SENSENOVA_FAST_ARTIFACT=$(sv_fast_artifact)"
+      say "SENSENOVA_QUALITY_ARTIFACT=$(sv_quality_artifact)"
+      say "daemon config: $(sv_home)/config.json"
+      ;;
+    set)
+      shift || true
+      [ "$#" -gt 0 ] || die "usage: sensenova-u1 config set KEY=VALUE [...]"
+      sv_write_conf "$@"
+      say "updated $(sv_conf) — restart the service for changes to take effect"
+      ;;
+    *) die "usage: sensenova-u1 config [show|set]" ;;
+  esac
+}
+
+cmd_generate() {
+  local prompt="" width=1024 height=1024 tier=fast out="" args="{}"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --prompt) prompt="${2:-}"; shift 2 ;;
+      --width)  width="${2:-}"; shift 2 ;;
+      --height) height="${2:-}"; shift 2 ;;
+      --tier)   tier="${2:-}"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [ -n "$prompt" ] || die 'usage: sensenova-u1 generate --prompt "..." [--tier fast|quality] [--width N --height N]'
+  sv_need_python
+  mkdir -p "$(sv_out_dir)"
+  args="$(python3 -c '
+import json, sys
+print(json.dumps({"prompt": sys.argv[1], "width": int(sys.argv[2]), "height": int(sys.argv[3]), "tier": sys.argv[4]}))
+' "$prompt" "$width" "$height" "$tier")"
+  printf '%s\n' \
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"generate_image\",\"arguments\":$args}}" \
+    | "$(sv_mcp)" 2>/dev/null \
+    | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    result = json.loads(line).get("result", {})
+    if result.get("isError"):
+        print(result["content"][0]["text"], file=sys.stderr)
+        sys.exit(1)
+    print(result["content"][0]["text"])
+'
+}
+
+cmd_logs() {
+  if [ "${1:-}" = "-f" ]; then
+    tail -f "$(sv_log)"
+  else
+    tail -40 "$(sv_log)"
+  fi
+}
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    version|--version|-v) say "sensenova-u1 $SV_VERSION" ;;
+    status)   cmd_status ;;
+    doctor)   cmd_doctor ;;
+    models)   cmd_models "$@" ;;
+    clients)  cmd_clients "$@" ;;
+    config)   cmd_config "$@" ;;
+    generate) cmd_generate "$@" ;;
+    start)    sv_service_start && say "started $(sv_label)" ;;
+    stop)     sv_service_stop && say "stopped $(sv_label)" ;;
+    restart)  sv_service_start && say "restarted $(sv_label)" ;;
+    logs)     cmd_logs "$@" ;;
+    unload)   sv_unload ;;
+    paths)
+      say "home       $(sv_home)"
+      say "binaries   $(sv_bin_dir)"
+      say "models     $(sv_home)/artifacts"
+      say "output     $(sv_out_dir)"
+      say "socket     $(sv_socket)"
+      say "log        $(sv_log)"
+      say "launchd    $(sv_plist)"
+      say "cli        $(sv_cli_path)"
+      ;;
+    help|--help|-h|"") usage ;;
+    *) usage; die "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"
