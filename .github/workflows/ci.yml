@@ -1,15 +1,23 @@
 name: ci
 
 # The package targets macOS 26 (see Package.swift), so the runner image has to
-# provide that SDK; adjust the label if your repository uses a different one.
+# provide that SDK. `macos-latest` tracks the newest stable image — pinning a
+# version label such as `macos-26` fails to schedule at all when the label does
+# not exist yet (measured: both jobs failed with zero steps), so the workflow
+# asserts the SDK version instead of trusting the label.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-smoke:
-    runs-on: macos-26
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -17,7 +25,10 @@ jobs:
         run: xcodebuild -downloadComponent MetalToolchain
 
       - name: Show toolchain
-        run: swift --version && sw_vers
+        run: |
+          swift --version && sw_vers && xcrun --show-sdk-version
+          swift_major="$(sw_vers -productVersion | cut -d. -f1)"
+          [ "$swift_major" -ge 26 ] || { echo "::error::this package needs the macOS 26 SDK or newer"; exit 1; }
 
       - name: Build
         run: make build
@@ -40,7 +51,11 @@ jobs:
           done
 
   release:
-    runs-on: macos-26
+    # The macOS runners bill at ten times the Linux rate, and this job is the
+    # expensive one (full build + installing the tarball). Run it when a release
+    # is actually being cut: push a v* tag, or start it by hand.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
