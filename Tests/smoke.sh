@@ -46,18 +46,25 @@ export SENSENOVA_MIN_WARM_SECONDS=5
 mkdir -p "$SENSENOVA_HOME"
 
 # Point the private daemon at whatever artifacts the installed service uses.
-host_home="$HOME/Models/SenseNova-U1.5"
+host_home="$HOME/Library/Application Support/SenseNovaU1"
+[ -f "$host_home/config.json" ] || host_home="$HOME/Models/SenseNova-U1.5"   # pre-0.2 layout
+models_root="$(awk -F= '/^SENSENOVA_MODELS=/{v=$2; gsub(/^'\''|'\''$/,"",v); print v}' \
+  "$host_home/service.conf" 2>/dev/null || true)"
+[ -n "$models_root" ] || models_root="$host_home/models"
+[ -d "$models_root" ] || models_root="$host_home/artifacts"                   # pre-0.2 layout
 fast_dir=""
 quality_dir=""
 if [ -f "$host_home/config.json" ]; then
-  read -r fast_dir quality_dir <<< "$(python3 -c '
+  # Two lines, not two words: the paths live under "Application Support".
+  { read -r fast_dir; read -r quality_dir; } <<< "$(python3 -c '
 import json, os, sys
 config = json.load(open(sys.argv[1]))
-home = sys.argv[2]
+models = sys.argv[2]
 def absolute(value):
-    return value if os.path.isabs(value) else os.path.join(home, value)
-print(absolute(config.get("fast_artifact", "")), absolute(config.get("quality_artifact", "")))
-' "$host_home/config.json" "$host_home")"
+    return value if os.path.isabs(value) else os.path.join(models, value)
+print(absolute(config.get("fast_artifact", "")))
+print(absolute(config.get("quality_artifact", "")))
+' "$host_home/config.json" "$models_root")"
 fi
 [ -n "$fast_dir" ] && [ -f "$fast_dir/config.json" ] || fast_dir=""
 [ -n "$quality_dir" ] && [ -f "$quality_dir/config.json" ] || quality_dir=""

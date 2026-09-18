@@ -53,8 +53,10 @@ cmd_status() {
   else
     say "launchd:  not loaded (the MCP front end starts the daemon on demand)"
   fi
-  say "socket:   $(sv_socket)"
   say "home:     $(sv_home)"
+  say "models:   $(sv_models)"
+  say "output:   $(sv_out_dir)"
+  say "socket:   $(sv_socket)"
   say "log:      $(sv_log)"
   if ! [ -x "$(sv_mcp)" ]; then
     say "state:    not installed — run install.sh"
@@ -90,6 +92,8 @@ cmd_doctor() {
 
   say "install"
   [ -f "$(sv_conf)" ] && check ok "service.conf" || check warn "service.conf missing" "re-run install.sh"
+  [ -f "$(sv_config)" ] && check ok "config.json" || check warn "config.json missing" "re-run install.sh"
+  [ -d "$(sv_out_dir)" ] && check ok "output directory" || check warn "output directory not created yet" "$(sv_out_dir) appears on the first generation"
   [ -x "$(sv_served)" ] && check ok "sensenova-served" || check fail "sensenova-served missing" "run install.sh"
   [ -x "$(sv_mcp)" ] && check ok "sensenova-mcp" || check fail "sensenova-mcp missing" "run install.sh"
   local bundle count
@@ -140,6 +144,11 @@ cmd_doctor() {
     else check warn "$client detected but not wired" "sensenova-u1 clients add $client"; fi
   done
   [ "$wired" -gt 0 ] || check warn "no client wired yet" "sensenova-u1 clients add auto"
+
+  local legacy="${SENSENOVA_LEGACY_HOME:-$HOME/Models/SenseNova-U1.5}"
+  if [ -d "$legacy/bin" ]; then
+    check warn "old layout still on disk" "$legacy keeps compatibility wrappers; restart the MCP clients and delete it (Docs/LAYOUT.md)"
+  fi
 
   say ""
   if [ "$problems" -eq 0 ]; then
@@ -249,9 +258,11 @@ cmd_config() {
       say "SENSENOVA_PREFIX=$(sv_prefix)"
       say "SENSENOVA_LABEL=$(sv_label)"
       say "SENSENOVA_SOCKET=$(sv_socket)"
+      say "SENSENOVA_MODELS=$(sv_models)"
+      say "SENSENOVA_OUT=$(sv_out_dir)"
       say "SENSENOVA_FAST_ARTIFACT=$(sv_fast_artifact)"
       say "SENSENOVA_QUALITY_ARTIFACT=$(sv_quality_artifact)"
-      say "daemon config: $(sv_home)/config.json"
+      say "daemon config: $(sv_config)"
       ;;
     set)
       shift || true
@@ -322,8 +333,10 @@ main() {
     unload)   sv_unload ;;
     paths)
       say "home       $(sv_home)"
+      say "config     $(sv_config)"
+      say "service    $(sv_conf)"
       say "binaries   $(sv_bin_dir)"
-      say "models     $(sv_home)/artifacts"
+      say "models     $(sv_models)"
       say "output     $(sv_out_dir)"
       say "socket     $(sv_socket)"
       say "log        $(sv_log)"

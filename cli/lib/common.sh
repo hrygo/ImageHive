@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Shared helpers for the sensenova-u1 CLI and the installers. Sourced, not run.
 
-SV_VERSION="0.1.0"
-SV_DEFAULT_HOME="$HOME/Models/SenseNova-U1.5"
+SV_VERSION="0.2.0"
+# Layout (see Docs/LAYOUT.md). macOS conventions, every path overridable:
+#   app data  ~/Library/Application Support/SenseNovaU1  (config, socket, weights)
+#   logs      ~/Library/Logs/SenseNovaU1
+#   commands  ~/.local/bin, private executables ~/.local/share/sensenova-u1
+#   images    ~/Pictures/SenseNovaU1
+SV_DEFAULT_HOME="$HOME/Library/Application Support/SenseNovaU1"
 SV_DEFAULT_LABEL="local.sensenova-u1"
 SV_DEFAULT_PREFIX="$HOME/.local"
-SV_DEFAULT_SOCKET="$HOME/Library/Application Support/SenseNovaU1/served.sock"
-SV_DEFAULT_FAST="artifacts/SenseNova-U1.5-8B-MoT-8step-4bit"
-SV_DEFAULT_QUALITY="artifacts/SenseNova-U1.5-8B-MoT-bf16"
+SV_DEFAULT_OUT="$HOME/Pictures/SenseNovaU1"
+SV_DEFAULT_FAST="SenseNova-U1.5-8B-MoT-8step-4bit"
+SV_DEFAULT_QUALITY="SenseNova-U1.5-8B-MoT-bf16"
 
 if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
   SV_BOLD=$'\033[1m'; SV_DIM=$'\033[2m'; SV_RED=$'\033[31m'; SV_GREEN=$'\033[32m'
@@ -25,20 +30,48 @@ die()  { printf '%serror:%s %s\n' "$SV_RED" "$SV_RESET" "$*" >&2; exit 1; }
 # --- paths -------------------------------------------------------------------
 
 sv_home()     { printf '%s\n' "${SENSENOVA_HOME:-$SV_DEFAULT_HOME}"; }
+sv_models()   { printf '%s\n' "${SENSENOVA_MODELS:-$(sv_home)/models}"; }
+sv_config()   { printf '%s\n' "$(sv_home)/config.json"; }
 sv_conf()     { printf '%s\n' "$(sv_home)/service.conf"; }
-sv_bin_dir()  { printf '%s\n' "$(sv_home)/bin"; }
+sv_bin_dir()  { printf '%s\n' "$(sv_prefix)/share/sensenova-u1/bin"; }
 sv_served()   { printf '%s\n' "$(sv_bin_dir)/sensenova-served"; }
 sv_mcp()      { printf '%s\n' "$(sv_bin_dir)/sensenova-mcp"; }
-sv_out_dir()  { printf '%s\n' "$(sv_home)/out"; }
+sv_out_dir()  { printf '%s\n' "${SENSENOVA_OUT:-$SV_DEFAULT_OUT}"; }
 sv_log()      { printf '%s\n' "$HOME/Library/Logs/SenseNovaU1/served.log"; }
 sv_plist()    { printf '%s\n' "$HOME/Library/LaunchAgents/$(sv_label).plist"; }
-sv_socket()   { printf '%s\n' "${SENSENOVA_SOCKET:-$SV_DEFAULT_SOCKET}"; }
+sv_socket()   { printf '%s\n' "${SENSENOVA_SOCKET:-$(sv_home)/served.sock}"; }
 sv_label()    { printf '%s\n' "${SENSENOVA_LABEL:-$SV_DEFAULT_LABEL}"; }
 sv_prefix()   { printf '%s\n' "${SENSENOVA_PREFIX:-$SV_DEFAULT_PREFIX}"; }
 sv_cli_path() { printf '%s\n' "$(sv_prefix)/bin/sensenova-u1"; }
 
-sv_fast_artifact()    { printf '%s\n' "${SENSENOVA_FAST_ARTIFACT:-$SV_DEFAULT_FAST}"; }
-sv_quality_artifact() { printf '%s\n' "${SENSENOVA_QUALITY_ARTIFACT:-$SV_DEFAULT_QUALITY}"; }
+# The daemon reads the tiers from config.json, so the CLI must read the same
+# file — two sources of truth here means `doctor` reports a tier the service is
+# not actually using. Environment still wins, which is how install.sh drives it.
+sv_config_value() { # <key> — value from <app home>/config.json, empty if absent
+  local file; file="$(sv_config)"
+  [ -f "$file" ] || return 1
+  sv_have python3 || return 1
+  python3 -c '
+import json, sys
+try:
+    value = json.load(open(sys.argv[1])).get(sys.argv[2], "")
+except Exception:
+    value = ""
+print(value if isinstance(value, str) else "")
+' "$file" "$1"
+}
+
+sv_fast_artifact() {
+  local value
+  value="$(sv_config_value fast_artifact 2>/dev/null || true)"
+  printf '%s\n' "${SENSENOVA_FAST_ARTIFACT:-${value:-$SV_DEFAULT_FAST}}"
+}
+
+sv_quality_artifact() {
+  local value
+  value="$(sv_config_value quality_artifact 2>/dev/null || true)"
+  printf '%s\n' "${SENSENOVA_QUALITY_ARTIFACT:-${value:-$SV_DEFAULT_QUALITY}}"
+}
 
 sv_artifact_dir() { # fast|quality -> absolute path
   local rel
@@ -48,7 +81,7 @@ sv_artifact_dir() { # fast|quality -> absolute path
   esac
   case "$rel" in
     /*) printf '%s\n' "$rel" ;;
-    *)  printf '%s\n' "$(sv_home)/$rel" ;;
+    *)  printf '%s\n' "$(sv_models)/$rel" ;;
   esac
 }
 
@@ -62,7 +95,7 @@ sv_artifact_dir() { # fast|quality -> absolute path
 sv_load_conf() {
   local keep_home="${SENSENOVA_HOME:-}" keep_prefix="${SENSENOVA_PREFIX:-}"
   local keep_label="${SENSENOVA_LABEL:-}" keep_socket="${SENSENOVA_SOCKET:-}"
-  local keep_fast="${SENSENOVA_FAST_ARTIFACT:-}" keep_quality="${SENSENOVA_QUALITY_ARTIFACT:-}"
+  local keep_models="${SENSENOVA_MODELS:-}" keep_out="${SENSENOVA_OUT:-}"
   local file line key value
   file="$(sv_conf)"
   if [ -f "$file" ]; then
@@ -88,8 +121,11 @@ sv_load_conf() {
         SENSENOVA_PREFIX)            SENSENOVA_PREFIX="$value" ;;
         SENSENOVA_LABEL)             SENSENOVA_LABEL="$value" ;;
         SENSENOVA_SOCKET)            SENSENOVA_SOCKET="$value" ;;
-        SENSENOVA_FAST_ARTIFACT)     SENSENOVA_FAST_ARTIFACT="$value" ;;
-        SENSENOVA_QUALITY_ARTIFACT)  SENSENOVA_QUALITY_ARTIFACT="$value" ;;
+        SENSENOVA_MODELS)            SENSENOVA_MODELS="$value" ;;
+        SENSENOVA_OUT)               SENSENOVA_OUT="$value" ;;
+        # Tiers live in config.json (the daemon's own file); ignore the legacy
+        # keys so there is exactly one place a file can set them.
+        SENSENOVA_FAST_ARTIFACT|SENSENOVA_QUALITY_ARTIFACT) ;;
       esac
     done < "$file"
   fi
@@ -97,8 +133,8 @@ sv_load_conf() {
   [ -n "$keep_prefix" ] && SENSENOVA_PREFIX="$keep_prefix"
   [ -n "$keep_label" ] && SENSENOVA_LABEL="$keep_label"
   [ -n "$keep_socket" ] && SENSENOVA_SOCKET="$keep_socket"
-  [ -n "$keep_fast" ] && SENSENOVA_FAST_ARTIFACT="$keep_fast"
-  [ -n "$keep_quality" ] && SENSENOVA_QUALITY_ARTIFACT="$keep_quality"
+  [ -n "$keep_models" ] && SENSENOVA_MODELS="$keep_models"
+  [ -n "$keep_out" ] && SENSENOVA_OUT="$keep_out"
   return 0
 }
 
@@ -112,8 +148,11 @@ sv_write_conf() {
       SENSENOVA_PREFIX=*)         SENSENOVA_PREFIX="${override#*=}" ;;
       SENSENOVA_LABEL=*)          SENSENOVA_LABEL="${override#*=}" ;;
       SENSENOVA_SOCKET=*)         SENSENOVA_SOCKET="${override#*=}" ;;
-      SENSENOVA_FAST_ARTIFACT=*)  SENSENOVA_FAST_ARTIFACT="${override#*=}" ;;
-      SENSENOVA_QUALITY_ARTIFACT=*) SENSENOVA_QUALITY_ARTIFACT="${override#*=}" ;;
+      SENSENOVA_MODELS=*)         SENSENOVA_MODELS="${override#*=}" ;;
+      SENSENOVA_OUT=*)            SENSENOVA_OUT="${override#*=}" ;;
+      SENSENOVA_FAST_ARTIFACT=*|SENSENOVA_QUALITY_ARTIFACT=*)
+        die "tier paths live in $(sv_config) — edit that file instead"
+        ;;
       *) die "unknown setting: $override" ;;
     esac
   done
@@ -130,8 +169,8 @@ sv_write_conf() {
     printf 'SENSENOVA_PREFIX=%s\n' "$(sv_quote "$(sv_prefix)")"
     printf 'SENSENOVA_LABEL=%s\n' "$(sv_quote "$(sv_label)")"
     printf 'SENSENOVA_SOCKET=%s\n' "$(sv_quote "$(sv_socket)")"
-    printf 'SENSENOVA_FAST_ARTIFACT=%s\n' "$(sv_quote "$(sv_fast_artifact)")"
-    printf 'SENSENOVA_QUALITY_ARTIFACT=%s\n' "$(sv_quote "$(sv_quality_artifact)")"
+    printf 'SENSENOVA_MODELS=%s\n' "$(sv_quote "$(sv_models)")"
+    printf 'SENSENOVA_OUT=%s\n' "$(sv_quote "$(sv_out_dir)")"
   } > "$tmp"
   mv "$tmp" "$(sv_conf)"
 }

@@ -65,12 +65,12 @@ main() {
   say "  command       $(sv_cli_path), $(sv_prefix)/share/sensenova-u1"
   say "  MCP entries   any client wired to '${SV_SERVER_NAME}'"
   if [ "$PURGE_MODELS" = "1" ]; then
-    say "  artifacts     $(sv_home)/artifacts (--purge-models)"
+    say "  models        $(sv_models) (--purge-models)"
   else
     say ""
     say "will keep:"
-    say "  artifacts     $(sv_home)/artifacts ($(sv_dir_size "$(sv_home)/artifacts"))"
-    say "  config/logs   $(sv_conf), $(sv_log)"
+    say "  models        $(sv_models) ($(sv_dir_size "$(sv_models)"))"
+    say "  config/logs   $(sv_config), $(sv_conf), $(sv_log)"
   fi
   say ""
 
@@ -116,7 +116,7 @@ main() {
 
   if [ "$PURGE_MODELS" = "1" ]; then
     step "artifacts"
-    for dir in "$(sv_home)"/artifacts/*; do
+    for dir in "$(sv_models)"/*; do
       [ -d "$dir" ] && { run rm -rf "$dir"; say "removed $dir"; }
     done
   fi
@@ -124,7 +124,7 @@ main() {
   step "done"
   say "The service is gone."
   if [ "$PURGE_MODELS" = "0" ]; then
-    say "Artifacts are still on disk ($(sv_dir_size "$(sv_home)/artifacts")) so a reinstall is quick:"
+    say "Artifacts are still on disk ($(sv_dir_size "$(sv_models)")) so a reinstall is quick:"
     say "  ./install.sh --model none"
     say "Remove them with: ./uninstall.sh --purge-models"
   fi

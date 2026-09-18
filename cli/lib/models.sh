@@ -34,7 +34,7 @@ sv_preset_repo() { sv_preset_field "$1" 2; }
 sv_preset_tier() { sv_preset_field "$1" 3; }
 
 sv_preset_dir() { # absolute artifact directory for a preset
-  printf '%s\n' "$(sv_home)/artifacts/$(sv_preset_repo "$1" | tr '/' '-')"
+  printf '%s\n' "$(sv_models)/$(sv_preset_repo "$1" | tr '/' '-')"
 }
 
 sv_require_python() {

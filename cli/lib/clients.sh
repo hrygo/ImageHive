@@ -12,10 +12,14 @@ SV_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 sv_client_list() { printf '%s\n' codex claude opencode qwenpaw claude-desktop cursor; }
 
 # Fills SV_ENV_PAIRS with the KEY=VALUE pairs every generated client entry
-# needs. An array, not a word-split string: a home directory may contain spaces.
+# needs. An array, not a word-split string: a path may contain spaces. Models
+# and output are pinned only when they differ from what the app home implies,
+# so a normal install gets a two-line entry and a custom layout still works.
 SV_ENV_PAIRS=()
 sv_client_env_pairs() {
   SV_ENV_PAIRS=("SENSENOVA_HOME=$(sv_home)" "SENSENOVA_SERVED_BIN=$(sv_served)")
+  [ "$(sv_models)" = "$(sv_home)/models" ] || SV_ENV_PAIRS+=("SENSENOVA_MODELS=$(sv_models)")
+  [ "$(sv_out_dir)" = "$SV_DEFAULT_OUT" ] || SV_ENV_PAIRS+=("SENSENOVA_OUT=$(sv_out_dir)")
 }
 
 sv_client_detect() {
@@ -162,13 +166,10 @@ sv_client_has() {
 }
 
 sv_print_snippet() {
-  cat <<EOF
-Point your client at this stdio MCP server:
-
-  command: $(sv_mcp)
-  env:     SENSENOVA_HOME=$(sv_home)
-           SENSENOVA_SERVED_BIN=$(sv_served)
-EOF
+  sv_client_env_pairs
+  printf 'Point your client at this stdio MCP server:\n\n  command: %s\n  env:\n' "$(sv_mcp)"
+  local pair
+  for pair in "${SV_ENV_PAIRS[@]}"; do printf '    %s\n' "$pair"; done
 }
 
 # sv_client_add in a subshell: a hard failure for one client (a missing config,

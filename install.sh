@@ -6,6 +6,12 @@
 #   ./install.sh --model none       # use artifacts you already have
 #   ./install.sh --dry-run          # print every action, change nothing
 #
+# Where things go (Docs/LAYOUT.md; every path is overridable):
+#   ~/Library/Application Support/SenseNovaU1/  config.json, service.conf, served.sock, models/
+#   ~/.local/bin/sensenova-u1                   the command (~/.local/share/sensenova-u1 holds it)
+#   ~/Library/Logs/SenseNovaU1/served.log       daemon log
+#   ~/Pictures/SenseNovaU1/                     generated images
+#
 # Steps: preflight -> model artifacts -> build -> install binaries -> config ->
 # LaunchAgent -> MCP clients -> smoke test. Safe to re-run: every step is
 # idempotent and only reports what it changed.
@@ -28,7 +34,8 @@ CLIENTS_CHOICE="auto"
 DO_BUILD="yes"
 DO_SMOKE_GENERATE=0
 
-usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# Everything after line 1 up to the first non-comment line is the usage text.
+usage() { awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "${BASH_SOURCE[0]}"; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -38,8 +45,11 @@ while [ "$#" -gt 0 ]; do
     --source)      SOURCE="${2:-}"; shift 2 ;;
     --clients)     CLIENTS_CHOICE="${2:-}"; shift 2 ;;
     --home)        SENSENOVA_HOME="${2:-}"; shift 2 ;;
+    --models)      SENSENOVA_MODELS="${2:-}"; shift 2 ;;
+    --out)         SENSENOVA_OUT="${2:-}"; shift 2 ;;
     --prefix)      SENSENOVA_PREFIX="${2:-}"; shift 2 ;;
     --label)       SENSENOVA_LABEL="${2:-}"; shift 2 ;;
+    --legacy-home) SENSENOVA_LEGACY_HOME="${2:-}"; shift 2 ;;
     --fast-artifact)    SENSENOVA_FAST_ARTIFACT="${2:-}"; shift 2 ;;
     --quality-artifact) SENSENOVA_QUALITY_ARTIFACT="${2:-}"; shift 2 ;;
     --skip-build)  DO_BUILD="no"; shift ;;
@@ -50,6 +60,10 @@ while [ "$#" -gt 0 ]; do
 done
 
 sv_load_conf
+
+# Previous layout: everything (weights, binaries, images, config) in one
+# directory. Detected and migrated below; overridable for unusual setups.
+LEGACY_HOME="${SENSENOVA_LEGACY_HOME:-$HOME/Models/SenseNova-U1.5}"
 
 run() { # every mutating action goes through here, so --dry-run is honest
   if [ "$DRY_RUN" = "1" ]; then
@@ -107,11 +121,70 @@ preflight() {
     none) need_gb=4 ;;
     *)    need_gb=16 ;;
   esac
-  avail_gb="$(df -g "$(sv_home 2>/dev/null || echo /)" 2>/dev/null | awk 'NR==2{print $4}')"
+  # Weights are the big tenant, so measure the volume that will hold them.
+  local disk_root; disk_root="$(sv_models)"
+  while [ ! -d "$disk_root" ] && [ "$disk_root" != "/" ]; do disk_root="$(dirname "$disk_root")"; done
+  avail_gb="$(df -g "$disk_root" 2>/dev/null | awk 'NR==2{print $4}')"
   if [ -n "$avail_gb" ] && [ "$avail_gb" -lt "$need_gb" ]; then
     die "not enough disk space: ${avail_gb}GB free, this install needs about ${need_gb}GB (plus the build tree)"
   fi
   hint "disk: ${avail_gb:-?}GB free"
+}
+
+# ------------------------------------------------------------------- models --
+
+migrate_legacy() {
+  [ -d "$LEGACY_HOME" ] || return 0
+  step "migrating the previous layout"
+  hint "$LEGACY_HOME -> $(sv_home) (+ $(sv_models), $(sv_out_dir))"
+  run mkdir -p "$(sv_home)" "$(sv_models)" "$(sv_out_dir)"
+
+  local entry moved=0
+  if [ -d "$LEGACY_HOME/artifacts" ]; then
+    for entry in "$LEGACY_HOME/artifacts"/*; do
+      [ -e "$entry" ] || continue
+      [ -e "$(sv_models)/$(basename "$entry")" ] && { hint "already there: $(basename "$entry")"; continue; }
+      run mv "$entry" "$(sv_models)/" && moved=1
+    done
+  fi
+  if [ -d "$LEGACY_HOME/src" ] && [ ! -e "$(sv_models)/src" ]; then
+    run mv "$LEGACY_HOME/src" "$(sv_models)/src" && moved=1
+  fi
+  if [ -d "$LEGACY_HOME/out" ]; then
+    for entry in "$LEGACY_HOME/out"/*; do
+      [ -e "$entry" ] || continue
+      [ -e "$(sv_out_dir)/$(basename "$entry")" ] && continue
+      run mv "$entry" "$(sv_out_dir)/" && moved=1
+    done
+  fi
+
+  # A daemon started before the move still holds the socket and would keep
+  # looking for artifacts under the old paths, so let it go; front ends start a
+  # fresh one (with the new paths) on their next request. Only when something
+  # actually moved: a re-run on an already-migrated machine must not kill a
+  # serving daemon for nothing.
+  if [ "$moved" = "1" ] && pgrep -f "sensenova-served" >/dev/null 2>&1; then
+    hint "stopping the daemon that is still running with the old paths"
+    sv_service_stop >/dev/null 2>&1 || true
+    run pkill -f "sensenova-served" || true
+  fi
+  [ "$moved" = "1" ] || hint "nothing left to move — only the compatibility wrappers remain"
+
+  # The old config pinned artifacts as "artifacts/<name>" (relative to the old
+  # home) or as absolute paths underneath it. Under the new layout a bare name
+  # is relative to the models root, which is where those files just moved.
+  if [ "$DRY_RUN" = "0" ] && [ -f "$LEGACY_HOME/config.json" ] && [ ! -f "$(sv_config)" ]; then
+    # NB: the alternation below means the delimiter cannot be "|".
+    if sed -E -e 's#("(fast_|quality_)?artifact"[[:space:]]*:[[:space:]]*)"artifacts/#\1"#' \
+              -e "s#(\"(fast_|quality_)?artifact\"[[:space:]]*:[[:space:]]*)\"$LEGACY_HOME/artifacts/#\\1\"#" \
+              "$LEGACY_HOME/config.json" > "$(sv_config)"; then
+      hint "wrote $(sv_config) from the old config (artifact paths adjusted)"
+    else
+      rm -f "$(sv_config)"
+      warn "could not rewrite $LEGACY_HOME/config.json — a fresh one will be written"
+    fi
+  fi
+
 }
 
 # ------------------------------------------------------------------- models --
@@ -144,24 +217,25 @@ fetch_models() {
 
 write_daemon_config() {
   local presets; presets="$(choose_presets)"
-  if [ -z "$presets" ] && [ -f "$(sv_home)/config.json" ]; then
+  if [ -z "$presets" ] && [ -f "$(sv_config)" ]; then
     step "daemon config"
-    hint "keeping $(sv_home)/config.json (--model none)"
+    hint "keeping $(sv_config) (--model none)"
     return 0
   fi
   local fast quality
   if printf '%s\n' "$presets" | grep -q '^fast-'; then
-    fast="artifacts/$(sv_preset_repo fast-4bit | tr '/' '-')"
-    [ -d "$(sv_home)/$fast" ] || fast="artifacts/$(sv_preset_repo fast-8bit | tr '/' '-')"
+    # Artifact names are relative to the models root, not to the app home.
+    fast="$(sv_preset_repo fast-4bit | tr '/' '-')"
+    [ -d "$(sv_models)/$fast" ] || fast="$(sv_preset_repo fast-8bit | tr '/' '-')"
   else
     fast="$(sv_fast_artifact)"
   fi
   if printf '%s\n' "$presets" | grep -q '^quality-'; then
-    quality="artifacts/$(sv_preset_repo quality-bf16 | tr '/' '-')"
+    quality="$(sv_preset_repo quality-bf16 | tr '/' '-')"
   else
     quality="$(sv_quality_artifact)"
   fi
-  if [ "$(sv_home)/$fast" = "$(sv_home)/$quality" ]; then
+  if [ "$(sv_artifact_dir fast)" = "$(sv_artifact_dir quality)" ]; then
     die "fast and quality would point at the same artifact — pass --model none or pick a second tier"
   fi
   if [ -z "$presets" ]; then
@@ -171,7 +245,7 @@ write_daemon_config() {
   fi
 
   step "daemon config"
-  write_file "$(sv_home)/config.json" <<JSON
+  write_file "$(sv_config)" <<JSON
 {
   "ttl_seconds": 600,
   "min_warm_seconds": 60,
@@ -179,8 +253,8 @@ write_daemon_config() {
   "quality_artifact": "$quality"
 }
 JSON
-  hint "$(sv_home)/config.json: fast=$fast quality=$quality"
-  for dir in "$(sv_home)/$fast" "$(sv_home)/$quality"; do
+  hint "$(sv_config): fast=$fast quality=$quality (relative to $(sv_models))"
+  for dir in "$(sv_models)/$fast" "$(sv_models)/$quality"; do
     [ -f "$dir/config.json" ] || warn "artifact not present yet: $dir"
   done
 }
@@ -231,6 +305,39 @@ install_binaries() {
   hint "command installed: $(sv_cli_path)"
 }
 
+# MCP entries written before the layout change point at <legacy>/bin/* with
+# SENSENOVA_HOME=<legacy>. Those paths live in client configs and in sessions
+# that are already running, so leave small wrappers that re-export the new
+# paths and exec the real binary: old entries keep working, and every session
+# stays on ONE socket — which is what keeps it to one copy of the weights.
+# Delete the legacy directory once the clients have been restarted.
+link_legacy_home() {
+  [ -d "$LEGACY_HOME" ] || return 0
+  [ -d "$LEGACY_HOME/bin" ] || return 0
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '  %swould write:%s %s/bin/{sensenova-mcp,sensenova-served} (compatibility wrappers)\n' \
+      "$SV_DIM" "$SV_RESET" "$LEGACY_HOME" >&2
+    return 0
+  fi
+  local product
+  for product in sensenova-mcp sensenova-served; do
+    [ -e "$(sv_bin_dir)/$product" ] || continue
+    cat > "$LEGACY_HOME/bin/$product" <<SHIM
+#!/bin/sh
+# Compatibility wrapper for the pre-$SV_VERSION layout: the service moved to
+# ~/Library/Application Support/SenseNovaU1 (see Docs/LAYOUT.md). Re-run
+# ./install.sh, restart the MCP clients, then delete $LEGACY_HOME.
+export SENSENOVA_HOME="$(sv_home)"
+export SENSENOVA_MODELS="$(sv_models)"
+export SENSENOVA_OUT="$(sv_out_dir)"
+export SENSENOVA_SOCKET="$(sv_socket)"
+exec "$(sv_bin_dir)/$product" "\$@"
+SHIM
+    chmod 0755 "$LEGACY_HOME/bin/$product"
+  done
+  hint "compatibility wrappers left in $LEGACY_HOME/bin (old client entries keep working)"
+}
+
 write_conf_and_service() {
   step "configuration"
   if [ "$DRY_RUN" = "0" ]; then
@@ -260,6 +367,10 @@ write_conf_and_service() {
 		<string>$HOME</string>
 		<key>SENSENOVA_HOME</key>
 		<string>$(sv_home)</string>
+		<key>SENSENOVA_MODELS</key>
+		<string>$(sv_models)</string>
+		<key>SENSENOVA_OUT</key>
+		<string>$(sv_out_dir)</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -355,8 +466,15 @@ summary() {
   step "done"
   say "  service   $(sv_label)   ($(sv_served))"
   say "  command   $(sv_cli_path)"
+  say "  home      $(sv_home)"
+  say "  models    $(sv_models)"
   say "  output    $(sv_out_dir)"
   say "  logs      $(sv_log)"
+  if [ -d "$LEGACY_HOME/bin" ] && [ "$DRY_RUN" = "0" ]; then
+    say ""
+    say "Note: $LEGACY_HOME keeps compatibility wrappers for MCP clients wired"
+    say "      before this change. Restart those clients, then delete that directory."
+  fi
   say ""
   say "Next:"
   say "  sensenova-u1 doctor        check every moving part"
@@ -371,10 +489,12 @@ main() {
   say "${SV_BOLD}SenseNova-U1.5 local image service${SV_RESET} — installer $SV_VERSION"
   [ "$DRY_RUN" = "1" ] && warn "dry run: nothing will be changed"
   preflight
+  migrate_legacy
   fetch_models
   write_daemon_config
   build_binaries
   install_binaries
+  link_legacy_home
   write_conf_and_service
   wire_clients
   smoke_test
