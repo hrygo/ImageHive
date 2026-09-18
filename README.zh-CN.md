@@ -1,11 +1,10 @@
 # SenseNova-U1.5 本机生图服务
 
-> [English](README.md) · 英文版为准，中文版随 0.3.0 同步。术语、命令、字段、模型
+> [English](README.md) · 英文版为准，中文版随 0.5.0 同步。术语、命令、字段、模型
 > 名保持原文，方便和日志、配置、英文文档对上。
 >
-> 版本号：本仓库用自己的版本序列（`cli/lib/common.sh` 的 `SV_VERSION`）；
-> 所在的发行包里有 `BUILD-INFO.txt` 记录所基于的上游提交。两套编号互相独立，
-> 不要拿它和上游的 tag 比大小。
+> 版本号：接续上游 tag 序列（fork 时上游停在 `v0.4.0`），因此首个公开版是
+> **0.5.0**；发行包里的 `BUILD-INFO.txt` 记录所基于的上游提交。
 
 在自己的 Mac 上跑文生图、按指令改图和看图问答，通过 MCP 交给 AI agent 使用。
 不需要 API key、不按张计费、图片不出本机；模型经 MLX 在 Apple 芯片上运行，
@@ -18,16 +17,19 @@
 **用发行包**
 
 ```bash
-shasum -a 256 -c sensenova-u1-0.3.0-macos-arm64.tar.gz.sha256   # 校验下载是否完整
-tar -xzf sensenova-u1-0.3.0-macos-arm64.tar.gz
-cd sensenova-u1-0.3.0-macos-arm64
+base=https://github.com/hrygo/SenseNovaU1-Service/releases/latest/download
+curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz"
+curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz.sha256"
+shasum -a 256 -c sensenova-u1-macos-arm64.tar.gz.sha256   # 校验下载是否完整
+tar -xzf sensenova-u1-macos-arm64.tar.gz && cd sensenova-u1-*
 bash install.sh          # 用 bash，不要 ./install.sh —— 原因见下
 ```
 
 **从源码**（要改代码时；需要 Xcode 27 与 Metal 工具链，见前置条件）
 
 ```bash
-git clone <本仓库> && cd SenseNovaU1-Service
+git clone https://github.com/hrygo/SenseNovaU1-Service.git
+cd SenseNovaU1-Service
 ./install.sh
 ```
 

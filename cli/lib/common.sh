@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for the sensenova-u1 CLI and the installers. Sourced, not run.
 
-SV_VERSION="0.3.0"
+SV_VERSION="0.5.0"
 # Layout (see Docs/LAYOUT.md). macOS conventions, every path overridable:
 #   app data  ~/Library/Application Support/SenseNovaU1  (config, socket, weights)
 #   logs      ~/Library/Logs/SenseNovaU1

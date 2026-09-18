@@ -16,12 +16,15 @@ machine shares **one** resident copy of the weights.
 
 ## Quick start
 
-**From a release tarball** — no Xcode, no compiler, nothing to build:
+**From a release tarball** — no Xcode, no compiler, nothing to build. The stable
+asset name keeps this one-liner valid across releases:
 
 ```bash
-shasum -a 256 -c sensenova-u1-0.3.0-macos-arm64.tar.gz.sha256   # check the download
-tar -xzf sensenova-u1-0.3.0-macos-arm64.tar.gz
-cd sensenova-u1-0.3.0-macos-arm64
+base=https://github.com/hrygo/SenseNovaU1-Service/releases/latest/download
+curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz"
+curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz.sha256"
+shasum -a 256 -c sensenova-u1-macos-arm64.tar.gz.sha256
+tar -xzf sensenova-u1-macos-arm64.tar.gz && cd sensenova-u1-*
 bash install.sh          # `bash`, not `./install.sh` — see Docs/DISTRIBUTING.md
 ```
 
@@ -29,7 +32,8 @@ bash install.sh          # `bash`, not `./install.sh` — see Docs/DISTRIBUTING.
 Metal toolchain (see Requirements):
 
 ```bash
-git clone <this repository> && cd SenseNovaU1-Service
+git clone https://github.com/hrygo/SenseNovaU1-Service.git
+cd SenseNovaU1-Service
 ./install.sh
 ```
 

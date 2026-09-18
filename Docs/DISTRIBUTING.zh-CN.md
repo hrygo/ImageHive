@@ -35,13 +35,19 @@ dist/<名字>.tar.gz.sha256           归档自身的校验和
 ## 对方要做的事
 
 ```bash
-shasum -a 256 -c sensenova-u1-0.3.0-macos-arm64.tar.gz.sha256
-tar -xzf sensenova-u1-0.3.0-macos-arm64.tar.gz
-cd sensenova-u1-0.3.0-macos-arm64
+base=https://github.com/hrygo/SenseNovaU1-Service/releases/latest/download
+curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz"
+curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz.sha256"
+shasum -a 256 -c sensenova-u1-macos-arm64.tar.gz.sha256
+tar -xzf sensenova-u1-macos-arm64.tar.gz && cd sensenova-u1-*
 bash install.sh
 ```
 
 然后重启 agent，直接让它画一张图。不用装 Xcode、不用编译、不用 `sudo`。
+
+每次发行会把同一份归档挂两遍：带版本号的名字（`sensenova-u1-<版本>-macos-arm64.tar.gz`，
+便于锁定版本）和上面这个稳定名字（便于把那条命令长期写进文档不再改）。两者各有
+对应的 `.sha256`。
 
 ### 为什么是 `bash install.sh`，不是 `./install.sh`
 
@@ -82,8 +88,8 @@ bash install.sh
 
 ## 还没做的
 
-* **没有公开发布地址**：服务目前在一个只有本地分支的 fork 里，归档只能以文件形式
-  交给对方。要不要发到 GitHub release / Gitee / 网盘，是需要维护者决定的事。
 * 没有 Apple Developer ID 签名与公证（当前不需要：清隔离标记已解决实际问题）。
 * 没有 Homebrew formula / cask。
 * 安装器自身的输出目前是英文（文档是中文）。
+* **没有国内直连的镜像**：`releases/latest/download` 走 GitHub，部分网络需要代理；
+  这时把归档当文件发过去即可，安装方式完全一样。

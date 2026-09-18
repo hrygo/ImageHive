@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.3.0 — 2026-09-18
+## 0.5.0 — 2026-09-18 （首个公开发行版）
+
+**版本号说明**：本 fork 在私有时用过 0.1.0–0.3.0（从未对外发布）。首个公开版
+接续上游的 tag 序列编号——fork 时上游停在 `v0.4.0`，而 `v0.3.0`、`v0.3.1`、
+`v0.3.2` 这些 tag 上游已经占用了，继续用 0.3.x 会和上游的既有 tag 撞名，
+所以公开版从 **0.5.0** 开始；0.1.0–0.3.0 这些标签不再使用。
 
 **Handing this to someone else, and letting a non-developer use it.** The
 release archive was not installable, and a downloaded copy could hang on the
@@ -12,7 +17,7 @@ first launch; both are fixed and verified by `make release-verify`.
   the MLX bundles). `install.sh` sources `cli/lib/*.sh`, so the previous tarball —
   `prebuilt/` only — could not install anything.
 * The archive is named after the project version in `cli/lib/common.sh`
-  (0.3.0 here) instead of the upstream git tag, which used to make a fork build
+  (0.5.0 here) instead of the upstream git tag, which used to make a fork build
   look like an upstream release; the tag is recorded in `BUILD-INFO.txt`.
 * **Quarantine is handled.** Gatekeeper refuses to run a quarantined Mach-O: the
   process blocks in `syspolicyd` on a dialog a terminal install never shows, and

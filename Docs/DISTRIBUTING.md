@@ -38,14 +38,21 @@ release.
 ## What the recipient does
 
 ```bash
-shasum -a 256 -c sensenova-u1-0.3.0-macos-arm64.tar.gz.sha256
-tar -xzf sensenova-u1-0.3.0-macos-arm64.tar.gz
-cd sensenova-u1-0.3.0-macos-arm64
+base=https://github.com/hrygo/SenseNovaU1-Service/releases/latest/download
+curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz"
+curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz.sha256"
+shasum -a 256 -c sensenova-u1-macos-arm64.tar.gz.sha256
+tar -xzf sensenova-u1-macos-arm64.tar.gz && cd sensenova-u1-*
 bash install.sh
 ```
 
 Then restart their agent and ask for an image. Nothing else: no Xcode, no Swift,
 no `sudo`, no build step.
+
+A release publishes the archive twice: under its versioned name
+(`sensenova-u1-<version>-macos-arm64.tar.gz`, for pinning) and under the stable
+name above, so the one-liner does not have to be edited on every release. Both
+have a matching `.sha256`.
 
 ### Why `bash install.sh` and not `./install.sh`
 
@@ -88,8 +95,8 @@ step becomes redundant for the binaries (the flag would still be cleared).
 
 ## Not done yet
 
-* No published download URL: the service currently lives in a local-only fork, so
-  the archive is handed over as a file. Publishing it (a GitHub release, or a
-  mirror reachable without a proxy from China) is a decision for the maintainer.
 * No Apple Developer ID signature or notarisation.
 * No Homebrew formula or cask.
+* No mirror reachable without a proxy from China: `releases/latest/download` is
+  GitHub, which may need help to reach from some networks. Handing over the
+  archive as a file is the fallback, and it installs exactly the same way.

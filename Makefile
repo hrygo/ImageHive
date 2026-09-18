@@ -8,6 +8,9 @@ LABEL ?= local.sensenova-u1
 VERSION := $(shell sed -n 's/^SV_VERSION="\(.*\)"/\1/p' cli/lib/common.sh)
 REVISION := $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
 NAME := sensenova-u1-$(VERSION)-macos-arm64
+# A version-independent copy of the same archive, so a documented one-liner
+# (`.../releases/latest/download/<STABLE>.tar.gz`) never goes stale.
+STABLE := sensenova-u1-macos-arm64
 
 .PHONY: help build install uninstall test test-quick doctor release release-verify clean distclean
 
@@ -58,8 +61,10 @@ release: build
 	     | xargs shasum -a 256 > SHA256SUMS )
 	@tar -C dist -czf "dist/$(NAME).tar.gz" "$(NAME)"
 	@( cd dist && shasum -a 256 "$(NAME).tar.gz" > "$(NAME).tar.gz.sha256" )
-	@echo "dist/$(NAME).tar.gz"
-	@echo "dist/$(NAME).tar.gz.sha256"
+	@cp "dist/$(NAME).tar.gz" "dist/$(STABLE).tar.gz"
+	@( cd dist && shasum -a 256 "$(STABLE).tar.gz" > "$(STABLE).tar.gz.sha256" )
+	@echo "dist/$(NAME).tar.gz         (versioned)"
+	@echo "dist/$(STABLE).tar.gz  (stable name, same bytes)"
 
 release-verify: release
 	@bash scripts/verify_release.sh "dist/$(NAME).tar.gz"
