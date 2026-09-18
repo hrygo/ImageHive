@@ -25,7 +25,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+# A failure here is usually about the daemon, and the daemon's own log is the only
+# place that says why — it goes to a scratch file this script trashes on exit, so a
+# red CI run used to report the symptom with no way to see the cause (measured
+# 2026-09-18: `(closed, no reply)` from the probe, nothing else).
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  if [ -f "$work/daemon.log" ]; then
+    printf -- '--- daemon log (tail) ---\n' >&2
+    tail -20 "$work/daemon.log" >&2
+  fi
+  if [ -n "$daemon_pid" ]; then
+    if kill -0 "$daemon_pid" 2>/dev/null; then
+      printf '--- daemon pid %s is still alive ---\n' "$daemon_pid" >&2
+    else
+      printf '--- daemon pid %s is gone ---\n' "$daemon_pid" >&2
+    fi
+  fi
+  exit 1
+}
 ok()   { printf '   %s\n' "$*"; }
 
 served="$REPO_DIR/.build/release/imagehived"

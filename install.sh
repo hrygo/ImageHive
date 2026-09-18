@@ -3,6 +3,7 @@
 # (SenseNova-U1.5-8B-MoT on MLX) that MCP agents call.
 #
 #   ./install.sh                    # default: 4-bit fast tier, wire detected clients
+#   bash install.sh                 # from the release archive: builds nothing, uses prebuilt/
 #   ./install.sh --model both       # also pull the bf16 quality tier (~33 GiB)
 #   ./install.sh --model none       # use artifacts you already have
 #   ./install.sh --dry-run          # print every action, change nothing
@@ -65,6 +66,17 @@ while [ "$#" -gt 0 ]; do
     *)             usage; die "unknown option: $1" ;;
   esac
 done
+
+# A release archive carries prebuilt binaries, the CLI and the docs, but no
+# Package.swift — there is nothing to build and no toolchain to assume. `--skip-build`
+# says that, and our own quick start does not mention it: it says `bash install.sh`,
+# which died with "Package.swift not found" on the published 0.6.0 tarball (measured
+# 2026-09-18, by following the README). So the shape of the tree decides, and an
+# explicit --skip-build still wins.
+if [ "$DO_BUILD" = "yes" ] && [ ! -f "$REPO_DIR/Package.swift" ] && [ -x "$REPO_DIR/prebuilt/imagehived" ]; then
+  DO_BUILD="no"
+  hint "release archive (no Package.swift): installing prebuilt/ as is"
+fi
 
 ih_load_conf
 # A label recorded in an existing service.conf is that install's own choice as much
@@ -457,7 +469,10 @@ build_binaries() {
     hint "--skip-build: using prebuilt/ binaries"
     return 0
   fi
-  [ -f "$REPO_DIR/Package.swift" ] || die "Package.swift not found in $REPO_DIR"
+  [ -f "$REPO_DIR/Package.swift" ] || die "Package.swift not found in $REPO_DIR
+       this directory is neither a source checkout (no Package.swift) nor a release
+       archive (no prebuilt/imagehived) — clone the repository, or re-download the
+       release archive"
   if [ "$DRY_RUN" = "1" ]; then
     printf '  %swould run:%s swift build -c release (both products)\n' "$IH_DIM" "$IH_RESET" >&2
     return 0

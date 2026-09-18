@@ -103,6 +103,13 @@ socket 文件名、发行归档名。这是破坏性变更——写进 shell pro
 
 ### 修复
 
+* **发布包里的 `bash install.sh` 现在真的能装上了。** 归档刻意不含 `Package.swift`，而安装器
+  默认要构建，于是 README 与 Release 说明里那条命令死在 `error: Package.swift not found`；
+  `--skip-build` 只写在文档深处，`scripts/verify_release.sh` 又一直带着它跑，所以这条路径
+  从没被验证过（实测 2026-09-18：严格按 README 装发布包时踩到）。现在由目录形态决定——没有
+  `Package.swift` 但有 `prebuilt/imagehived` 就是发布包，直接装 `prebuilt/`，`--skip-build`
+  仍然有效；验证脚本改为跑用户真正会敲的那条命令，并用一个跑不起来的 `swift` 断言整条路径
+  不需要工具链，再逐字节比对装出来的二进制与 `prebuilt/`。
 * **opencode 的标记块被删干净了，包括收尾那一行。** 旧实现在遇到 `…:end` 时停止跳过，却把那一行
   留在文件里，于是每接一次线就多留一行 `// …:end`（实测 2026-09-18：本机 opencode 配置里躺着
   一条孤立的 `// sensenova-u1:end`，而再跑一次安装会在它上面再加一条）。现在块的起止两行一起删，

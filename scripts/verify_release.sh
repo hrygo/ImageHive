@@ -88,10 +88,24 @@ xattr -p com.apple.quarantine "$src/prebuilt/imagehived" >/dev/null 2>&1 \
 ok "prebuilt/imagehived is quarantined"
 
 echo "== 4. install it, with no Xcode and no Swift toolchain"
-mkdir -p "$sandbox_home"
-( cd "$src" && HOME="$sandbox_home" bash ./install.sh \
-    --skip-build --model none --clients none --label "$label" --yes ) \
-  || fail "install.sh failed"
+mkdir -p "$sandbox_home" "$work/no-toolchain"
+# A `swift` that cannot work, so this proves something: the archive has no
+# Package.swift, and the documented command is the plain `bash install.sh`. The
+# earlier version of this check passed `--skip-build` — which is not what the README
+# tells anyone to type, and that is exactly how a tarball whose plain install died
+# with "Package.swift not found" got published (measured 2026-09-18, following our
+# own quick start).
+printf '#!/bin/sh\necho "swift: not installed in this sandbox" >&2\nexit 127\n' \
+  > "$work/no-toolchain/swift"
+chmod 0755 "$work/no-toolchain/swift"
+( cd "$src" && HOME="$sandbox_home" PATH="$work/no-toolchain:$PATH" bash ./install.sh \
+    --model none --clients none --label "$label" --yes ) \
+  || fail "install.sh failed (the command the README documents, on a machine with no toolchain)"
+for product in imagehived imagehive-mcp; do
+  cmp -s "$src/prebuilt/$product" "$sandbox_home/.local/share/imagehive/bin/$product" \
+    || fail "$product was not installed from prebuilt/ (a build ran, or the copy differs)"
+done
+ok "installed from prebuilt/ with no toolchain, following the documented command"
 for target in "$sandbox_home/.local/share/imagehive/bin/imagehived" \
               "$sandbox_home/.local/share/imagehive/bin/imagehive-mcp" \
               "$sandbox_home/.local/share/imagehive/imagehive" \
