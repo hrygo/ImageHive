@@ -240,6 +240,9 @@ write_conf_and_service() {
     printf '  %swould write:%s %s\n' "$SV_DIM" "$SV_RESET" "$(sv_conf)" >&2
   fi
 
+  # This heredoc is deliberately unquoted so $(sv_*) expands. That also means
+  # backticks or $( ) anywhere in the body — comments included — are executed,
+  # so keep the template free of both.
   write_file "$(sv_plist)" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -264,8 +267,8 @@ write_conf_and_service() {
 	<false/>
 	<key>ProcessType</key>
 	<string>Background</string>
-	<!-- launchd throttles respawns; the 10s default would also stall every
-	     explicit `sensenova-u1 restart` by that much. 1s still damps a crash loop. -->
+	<!-- launchd throttles respawns; the 10s default would also delay every
+	     explicit restart by that much. 1s still damps a crash loop. -->
 	<key>ThrottleInterval</key>
 	<integer>1</integer>
 	<key>StandardOutPath</key>
