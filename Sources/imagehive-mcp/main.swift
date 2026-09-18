@@ -15,6 +15,34 @@
 
 import Foundation
 
+/// Leaves descriptors 0, 1 and 2 open, whatever the client did to them, before this
+/// process opens anything of its own. A front end started with stderr closed (a wrapper
+/// shell, an editor that spawns MCP servers with `2>&-`) had its *daemon socket* land on
+/// descriptor 2 — the first free one — and then wrote its log lines into that socket:
+/// measured 2026-09-19, the daemon read `imagehive-mcp: ignoring notification …` as a
+/// request, answered `unknown cmd ''`, and the caller got that as the reply to its next
+/// tool call. Our log lines must never be able to reach the wire.
+func reserveStandardDescriptors() {
+    for descriptor in Int32(0)...2 where fcntl(descriptor, F_GETFD) == -1 {
+        let opened = open("/dev/null", O_RDWR)
+        guard opened >= 0 else { continue }
+        if opened != descriptor {
+            _ = dup2(opened, descriptor)
+            close(opened)
+        }
+    }
+}
+
+reserveStandardDescriptors()
+
+// Ignore SIGPIPE for the whole process, before anything can write. Every channel
+// this program owns is a pipe or a socket owned by somebody else — the MCP client's
+// stdin/stdout, the client's log pipe, the daemon socket — so a peer that exits
+// mid-write must cost us a dropped line or a failed reply, never the process. This
+// used to sit just before the stdio loop, which left `imagehive --status` (it talks
+// on the daemon socket) and the `--version` prints unprotected.
+signal(SIGPIPE, SIG_IGN)
+
 /// The project version — `cli/lib/common.sh`'s `IH_VERSION`, written into
 /// `service.conf` by install.sh. Reported here and in `serverInfo` so a client log
 /// says which build answered; it used to print `0.1.0`, a number that matched no
@@ -91,8 +119,10 @@ let listTTLms = 60_000
 /// get the legacy envelope only, so nothing unexpected lands in their parsers.
 var modernEnvelope = false
 
+/// A log line for the client's stderr, best effort. Losing it is allowed; taking the
+/// process down over it is not (see `writeAll`).
 func log(_ message: String) {
-    FileHandle.standardError.write("imagehive-mcp: \(message)\n".data(using: .utf8)!)
+    _ = writeAll(STDERR_FILENO, Data("imagehive-mcp: \(message)\n".utf8))
 }
 
 let serverInstructions = """
@@ -143,14 +173,33 @@ func withSockaddr(_ path: String, _ body: (UnsafePointer<sockaddr>) -> Int32) ->
     }
 }
 
+/// Writes every byte, or reports that this descriptor refused them.
+///
+/// Raw `write(2)` on purpose, and now the only way this program writes anything:
+/// `FileHandle.write` raises an Objective-C exception when the write fails, and Swift
+/// cannot catch that, so the process aborted instead of losing one line. That is not
+/// hypothetical — the clients that spawn this front end (opencode, Codex, a wrapper
+/// shell) restart in batches, and the moment a client goes away both of its pipes are
+/// closed under us. Measured 2026-09-19: two crash reports for this binary, both
+/// `log(_:)` → `-[NSConcreteFileHandle writeData:]` → `_objc_terminate` → SIGABRT —
+/// one 0.13 s after launch (its "ready" line), one at "stdin closed, exiting".
+///
+/// EINTR is retried: an interrupted write is not a failure. Everything else (EPIPE,
+/// EBADF, EIO, a full disk) is reported, because "the log line is gone" and "the MCP
+/// transport is gone" are different problems and the caller decides.
 func writeAll(_ fd: Int32, _ data: Data) -> Bool {
     var sent = 0
     return data.withUnsafeBytes { raw -> Bool in
-        guard let base = raw.baseAddress else { return false }
+        guard let base = raw.baseAddress else { return data.isEmpty }
         while sent < raw.count {
             let n = write(fd, base.advanced(by: sent), raw.count - sent)
-            if n <= 0 { return false }
-            sent += n
+            if n > 0 {
+                sent += n
+            } else if n < 0 && errno == EINTR {
+                continue
+            } else {
+                return false
+            }
         }
         return true
     }
@@ -264,6 +313,9 @@ final class DaemonClient {
                 return line
             }
             let n = read(fd, &chunk, chunk.count)
+            // An interrupted read is not "the daemon stopped talking"; reported as one,
+            // it would blame a service that is answering everything else just fine.
+            if n < 0 && errno == EINTR { continue }
             if n <= 0 { return nil }
             pending.append(contentsOf: chunk[0..<n])
         }
@@ -440,7 +492,7 @@ let toolCatalogue: [[String: Any]] = [
           "width": {"type": "integer", "minimum": 256, "default": 1024, "description": "Pixels, multiple of 32."},
           "height": {"type": "integer", "minimum": 256, "default": 1024, "description": "Pixels, multiple of 32."},
           "steps": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Diffusion steps; omit for the tier default."},
-          "cfg": {"type": "number", "description": "Classifier-free guidance scale; omit for the tier default."},
+          "cfg": {"type": "number", "minimum": 0, "maximum": 100, "description": "Classifier-free guidance scale, 0...100; omit for the tier default."},
           "seed": {"type": "integer", "description": "Fixes generation for reproducibility; omit for random."},
           "negative": {
             "type": "string",
@@ -486,7 +538,7 @@ let toolCatalogue: [[String: Any]] = [
           "height": {"type": "integer", "description": "Output height in pixels; omit to derive it from target_pixels and the reference aspect ratio."},
           "target_pixels": {"type": "integer", "default": 4194304, "description": "Area budget used when width/height are omitted; default 2048x2048 equivalent."},
           "steps": {"type": "integer", "minimum": 1, "maximum": 100},
-          "cfg": {"type": "number"},
+          "cfg": {"type": "number", "minimum": 0, "maximum": 100},
           "img_cfg": {"type": "number", "default": 1.0, "description": "Image-guidance scale; raise it to follow the reference more literally."},
           "seed": {"type": "integer"},
           "inline_thumbnail": {"type": "boolean", "default": false}
@@ -556,9 +608,16 @@ let toolCatalogue: [[String: Any]] = [
 
 // MARK: - argument helpers
 
+/// Reads a whole number out of a reply. Deliberately defensive: `Int(d)` traps on a
+/// double outside Int's range, and while these values come from our own daemon, a
+/// front end that dies on a display value is not a front end worth having. `nil` makes
+/// every caller fall back to its own default.
 func intValue(_ any: Any?) -> Int? {
     if let n = any as? Int { return n }
-    if let d = any as? Double { return Int(d) }
+    if let d = any as? Double {
+        guard d.isFinite, d.magnitude <= 9_007_199_254_740_992 else { return nil }
+        return Int(d)
+    }
     if let n = any as? NSNumber { return n.intValue }
     if let s = any as? String { return Int(s) }
     return nil
@@ -722,7 +781,7 @@ func runTool(_ name: String, _ arguments: [String: Any]) -> [String: Any] {
         let available = ((tiers["available"] as? [String]) ?? []).joined(separator: ",")
         content.append(textBlock("""
         sizes: multiples of 32, \(intValue(sizes["minimum"]) ?? 0)...\(intValue(sizes["maximum"]) ?? 0); recommended \(recommended)
-        steps: \(intValue(steps["minimum"]) ?? 1)...\(intValue(steps["maximum"]) ?? 500) (fast \(intValue(steps["fast_default"]) ?? 8), quality \(intValue(steps["quality_default"]) ?? 50)); cfg fast \(doubleValue(cfg["fast_default"]) ?? 1.0) / quality \(doubleValue(cfg["quality_default"]) ?? 4.0)
+        steps: \(intValue(steps["minimum"]) ?? 1)...\(intValue(steps["maximum"]) ?? 500) (fast \(intValue(steps["fast_default"]) ?? 8), quality \(intValue(steps["quality_default"]) ?? 50)); cfg \(intValue(cfg["minimum"]) ?? 0)...\(intValue(cfg["maximum"]) ?? 100) (fast \(doubleValue(cfg["fast_default"]) ?? 1.0) / quality \(doubleValue(cfg["quality_default"]) ?? 4.0))
         seed: reproducible — same seed, same artifact, same settings writes the same bytes
         negative: generate_image only; edit_image rejects it
         sidecar: \((sidecar["enabled"] as? Bool) == true ? "on" : "off") — <image>.png.json (prompt + sha256, seed, size, steps, cfg, tier, artifact, seconds)
@@ -780,6 +839,13 @@ func serverInfo() -> [String: Any] {
     ["name": serverName, "title": serverTitle, "version": serverVersion]
 }
 
+/// The MCP transport itself, so a refused write here is a different problem from a
+/// refused log line: the peer that owns stdout is gone and nothing we compute can be
+/// delivered any more. Leave cleanly instead — the daemon owns the weights and
+/// finishes whatever it was asked to draw (that is what `cancellation.supported =
+/// false` means), and abandoning the session is what a client that closed its end
+/// asked for. A `FileHandle` write here used to abort the process instead, which is
+/// how a client restart turns into a crash report.
 func writeMessage(_ object: [String: Any]) {
     guard let data = try? JSONSerialization.data(withJSONObject: object) else {
         log("could not serialize a response")
@@ -787,7 +853,10 @@ func writeMessage(_ object: [String: Any]) {
     }
     var out = data
     out.append(0x0A)
-    FileHandle.standardOutput.write(out)
+    if !writeAll(STDOUT_FILENO, out) {
+        log("client closed stdout — exiting")
+        exit(0)
+    }
 }
 
 func reply(id: Any, _ result: [String: Any]) {
@@ -875,13 +944,15 @@ func handle(_ message: [String: Any]) {
 
 // MARK: - stdio loop
 
-signal(SIGPIPE, SIG_IGN)
 log("ready (socket \(socketPath))")
 
 var stdinBuffer = Data()
 var chunk = [UInt8](repeating: 0, count: 64 * 1024)
 while true {
     let n = read(0, &chunk, chunk.count)
+    // The same rule as everywhere else this program reads: a signal that interrupts the
+    // read is not the client leaving. Exiting here ends an MCP session that is fine.
+    if n < 0 && errno == EINTR { continue }
     if n <= 0 { break }
     stdinBuffer.append(contentsOf: chunk[0..<n])
     while let newline = stdinBuffer.firstIndex(of: 0x0A) {

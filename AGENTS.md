@@ -97,6 +97,35 @@ make release-verify  # 打出 tar 包并装进沙箱 HOME 验证
     0.6 之前的 home，那是又一个能加载权重的入口。任何新的安装/启动/卸载路径都要继续收旧
     名字（`ih_service_reap_legacy`、`ih_client_remove_legacy`），`uninstall.sh` 也一样；
     路径对照表在 [Docs/LAYOUT.md](Docs/LAYOUT.md) 的 "Upgrading from the old name"。
+12. **两个程序自己的输出只走 `write(2)`，日志写失败不许杀死进程。** 日志（stderr）和 MCP
+    协议（stdout）都不能用 `FileHandle`：写入失败时它抛 Objective-C 异常，而 Swift 接不
+    住，于是"对端把管道关了"以 `SIGABRT` 的形式落在进程头上。实测 2026-09-19：一小时内
+    两份 `imagehive-mcp` 崩溃报告，栈都是 `log(_:)` → `-[NSConcreteFileHandle writeData:]`
+    → `_objc_terminate`，其中一份在启动后 0.13 秒死在 "ready" 那一行上；守护进程走同一条
+    路径会带走唯一持有权重的进程。客户端的批量重启（系统升级之后最典型）必然关闭对端管道，
+    所以这不是边角情况。规矩：EINTR 重试，其余失败只丢一行日志；stdout 写失败意味着 MCP
+    传输没了，干净退出 0，而不是 abort；`signal(SIGPIPE, SIG_IGN)` 必须在写出第一个字节
+    之前就设好，否则死管道以信号形式杀人；**启动时先把 0/1/2 补齐**（缺的那个打开
+    `/dev/null`），否则"最低空闲 fd"可能就是下一个 socket——实测 2026-09-19，stderr 被
+    调用方关掉的前端把日志行写进了自己的 daemon socket，守护进程把它当成请求回了
+    `unknown cmd ''`，客户端于是把这条错误当成了**下一次调用**的答复。`Tests/smoke.sh
+    --quick` 里有一条断言守着这三种死管道（关掉的 stderr、读端已关的日志管道、读端已关
+    的 stdout）与这条 fd 卫生规则。
+13. **从请求里读数字时，任何会 trap 的转换都要先做范围判断。** `Int(Double)`、
+    `UInt64(Int)`、`UInt8(Float)` 在越界或非有限时是 Swift 的 fatal error，不是错误值：
+    进程带着 `SIGTRAP` 消失、日志里一个字都不留，等于一条请求带走了共用服务（实测
+    2026-09-19，逐个输入各起一个全新沙箱守护进程：`{"width": 1e30}`、`{"steps": 1e19}`、
+    `{"seed": 1e19}`、`{"width": 9223372036854775808}` 四条各自把它打死）。整数一律限制在
+    2^53 之内（再大就不再精确表示某个整数），越界按普通错误拒绝并给出合法写法；浮点进模型
+    前先问 `isFinite` 并落在契约范围内（`cfg`/`img_cfg` 是 `0...100`，校验、`options`、
+    工具 schema 三处一致）。这只关"会 trap"，不关"严格"——硬约束 9 依然成立，别把它换成
+    宽松回落。
+14. **用户数据只做整体替换，不做就地重写。** 接线的目标文件是用户编辑器的配置，而且是那份
+    设置的唯一副本：`open(path, "w").write(...)` 先截断再写，进程死在中间就只剩半截文件
+    （实测 2026-09-19，排查时发现这是仓库里最后一处就地写用户数据的地方）。统一走
+    `cli/lib/atomic_write.py`（同目录临时文件 + fsync + 保留权限 + `os.replace`）；安装器
+    的二进制与资源 bundle 同理，先复制到临时名再 `mv`。`Tests/rename.sh` 断言"写不成时原
+    文件逐字节不变、不留临时文件"，`--dry-run` 也必须如实打印这些步骤。
 
 ## 如何验证一处改动
 

@@ -213,6 +213,41 @@ if [ "$(markers 'imagehive:end')" != "1" ]; then
 fi
 ok "opencode: the old marked block is replaced, not left beside the new one (and wiring twice adds nothing)"
 
+# The config being edited belongs to the user's editor and it is the only copy of those
+# settings, so a wiring run has to replace it whole: a truncate-and-rewrite leaves a
+# half-written file behind if the process dies in between (measured 2026-09-19 — this was
+# the last place in the project still writing user data in place).
+inode_before="$(stat -f '%i' "$home/.config/opencode/opencode.jsonc")"
+"${cli[@]}" clients add opencode >/dev/null 2>&1 || fail "the third clients add opencode failed"
+inode_after="$(stat -f '%i' "$home/.config/opencode/opencode.jsonc")"
+[ "$inode_before" != "$inode_after" ] \
+  || fail "the config was rewritten in place; a crash mid-write would truncate it"
+leftovers="$(find "$home/.config/opencode" "$home/.cursor" -name '.imagehive-*' | wc -l | tr -d ' ')"
+[ "$leftovers" = "0" ] || fail "the wiring left $leftovers scratch files behind"
+# And a write that cannot finish must leave the original byte-identical.
+python3 - "$src" "$home/.config/opencode/opencode.jsonc" <<'PY' || fail "a failed config write damaged the file"
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "cli", "lib"))
+from atomic_write import write_text
+
+path = sys.argv[2]
+directory = os.path.dirname(path)
+before = open(path).read()
+os.chmod(directory, 0o500)      # a temporary file can no longer be created here
+try:
+    write_text(path, "half a file")
+except OSError:
+    pass
+else:
+    sys.exit("a write into a directory that cannot take a temporary file was accepted")
+finally:
+    os.chmod(directory, 0o700)
+after = open(path).read()
+assert after == before, "the config changed even though the write could not finish"
+assert not [n for n in os.listdir(directory) if n.startswith(".imagehive-")], "a scratch file survived"
+print("   client configs are replaced whole: a write that cannot finish changes nothing")
+PY
+
 # ---------------------------------------------------------------------- uninstall
 
 echo "== uninstall.sh, on top of all that"

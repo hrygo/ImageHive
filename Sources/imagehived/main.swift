@@ -29,6 +29,28 @@ import UniformTypeIdentifiers
 
 let environmentForConfig = ProcessInfo.processInfo.environment
 
+/// Leaves descriptors 0, 1 and 2 open, whatever the caller did to them, before this
+/// process opens anything of its own. A daemon started with `2>&-` (a wrapper that
+/// closes stderr, `imagehived 2>&1 | head`, a launchd job with a broken log path) used
+/// to have its *listening socket* land on descriptor 2 — the first free one — so every
+/// `log()` line was written into a descriptor that belonged to somebody else. The
+/// measured 2026-09-19 shape of that bug in the front end: the line
+/// `imagehive-mcp: ignoring notification …` went down the daemon socket, the daemon
+/// answered `unknown cmd ''`, and the caller received that answer to its *next* call.
+/// A log channel we do not own is `/dev/null`, never a socket, a PNG or a client.
+func reserveStandardDescriptors() {
+    for descriptor in Int32(0)...2 where fcntl(descriptor, F_GETFD) == -1 {
+        let opened = open("/dev/null", O_RDWR)
+        guard opened >= 0 else { continue }
+        if opened != descriptor {
+            _ = dup2(opened, descriptor)
+            close(opened)
+        }
+    }
+}
+
+reserveStandardDescriptors()
+
 /// The socket protocol version: bumped only when the wire format changes in a way
 /// an existing client would misread. Reported by `status` and `options`.
 let protocolVersion = 1
@@ -260,6 +282,10 @@ func jsonIsBoolean(_ value: Any) -> Bool {
     return CFGetTypeID(number) == CFBooleanGetTypeID()
 }
 
+/// The largest whole number JSON can carry exactly: 2^53. Past it a double no longer
+/// names one integer and one only, so "the caller sent this number" stops being true.
+let exactJSONIntegerLimit = 9_007_199_254_740_992.0
+
 /// What the caller sent, in words that can be acted on.
 func describeJSONValue(_ value: Any) -> String {
     if jsonIsBoolean(value), let flag = value as? Bool { return "the boolean \(flag)" }
@@ -284,8 +310,21 @@ func intArgStrict(_ request: [String: Any], _ key: String) throws -> Int? {
     if jsonIsBoolean(raw) { throw RequestError.bad("\(key) must be a number, got \(describeJSONValue(raw))") }
     if let n = raw as? Int { return n }
     if let d = raw as? Double {
-        guard d == d.rounded() else {
+        guard d.isFinite, d == d.rounded() else {
             throw RequestError.bad("\(key) must be a whole number, got \(d)")
+        }
+        // `Int(d)` is not a conversion here, it is a trap: a value outside Int's range
+        // is a fatal error Swift cannot catch, and the whole daemon disappears with
+        // SIGTRAP and an empty log. Measured 2026-09-19 — `"width": 1e30`,
+        // `"steps": 1e19` and `"width": 9223372036854775808` each took the service
+        // down on the spot, from a request that was supposed to be refused. Same rule
+        // as the `[reshape]` fatal: refuse before it can reach anything.
+        guard d.magnitude <= exactJSONIntegerLimit else {
+            throw RequestError.bad("""
+            \(key) \(d) is too large to be an exact whole number — JSON keeps numbers above \
+            \(Int64(exactJSONIntegerLimit)) only approximately. Send a smaller integer, \
+            written without an exponent.
+            """)
         }
         return Int(d)
     }
@@ -386,6 +425,28 @@ func validatedOptionalInt(_ request: [String: Any], _ key: String,
             + "\(range.lowerBound)...\(range.upperBound)")
     }
     return value
+}
+
+/// The guidance scales `generate` and `edit` accept, and the range `options` reports.
+/// Reported as a contract, not enforced as a taste: the reference recipe runs cfg 4.0
+/// and the distilled one 1.0, and 100 is far past anything the model can use. The
+/// bound exists because a value like `1e30` is still finite in JSON but becomes
+/// `Float.inf`, and `inf` guidance produces NaN latents — which used to reach the PNG
+/// writer and trap there (`Int(NaN)`) *after* a full generation, killing the shared
+/// service minutes into somebody's session (measured 2026-09-19).
+let guidanceLimits: ClosedRange<Double> = 0...100
+
+/// Validated up front, resolved later: the default (1.0 or 4.0) depends on the
+/// artifact that ends up resident, but a value the model cannot use must be refused
+/// before the 33 GiB load.
+func validatedGuidance(_ request: [String: Any], _ key: String) throws -> Float? {
+    guard let value = try doubleArgStrict(request, key) else { return nil }
+    guard value.isFinite, guidanceLimits.contains(value) else {
+        throw RequestError.bad("\(key) \(value) is outside the supported range "
+            + "\(Int(guidanceLimits.lowerBound))...\(Int(guidanceLimits.upperBound)) "
+            + "(fast default 1.0, quality default 4.0)")
+    }
+    return Float(value)
 }
 
 /// The seed, plus whether the caller pinned it — a sidecar that says "random" is
@@ -526,6 +587,7 @@ func optionsReport() -> [String: Any] {
             "note": "omit to use the recipe of the artifact that runs; a value of 12 or less also selects the fast tier when tier is omitted",
         ],
         "cfg": [
+            "minimum": Int(guidanceLimits.lowerBound), "maximum": Int(guidanceLimits.upperBound),
             "fast_default": 1.0, "quality_default": 4.0,
             "note": "1.0 or below skips the unconditional branch, so negative is ignored at that setting",
         ],
@@ -632,8 +694,14 @@ func writePNG(_ image: MLXArray, to url: URL) throws {
     var rgba = [UInt8](repeating: 255, count: width * height * 4)
     for i in 0..<(width * height) {
         for c in 0..<3 {
-            let v = planes[c * height * width + i] * 0.5 + 0.5
-            rgba[i * 4 + c] = UInt8(max(0, min(255, Int((v * 255).rounded()))))
+            var v = planes[c * height * width + i] * 0.5 + 0.5
+            // A NaN or an infinity here means the model produced a value no image can
+            // hold — not a reason to lose the whole run. `Int(NaN)` traps, so the daemon
+            // used to die *after* a full generation (measured 2026-09-19, reachable
+            // through a guidance scale of `inf`); paint it as the extreme it is nearest.
+            if !v.isFinite { v = v > 0 ? 1 : 0 }
+            v = min(max(v, 0), 1)
+            rgba[i * 4 + c] = UInt8((v * 255).rounded())
         }
     }
     guard let provider = CGDataProvider(data: Data(rgba) as CFData),
@@ -889,6 +957,7 @@ actor Core {
         let stepsArg = try validatedOptionalInt(request, "steps", range: 1...500)
         let (seed, seedExplicit) = try validatedSeed(request)
         let negative = try stringArgStrict(request, "negative") ?? ""
+        let cfgOverride = try validatedGuidance(request, "cfg")
         let wanted = canonicalTier(tier)
         let resident = try await ensureLoaded(wanted)
         let m = resident.model
@@ -899,7 +968,7 @@ actor Core {
         let distilled = resident.tier == "fast"
         var p = T2IParams()
         p.numSteps = stepsArg ?? (distilled ? 8 : 50)
-        p.cfgScale = Float(try doubleArgStrict(request, "cfg") ?? (distilled ? 1.0 : 4.0))
+        p.cfgScale = cfgOverride ?? (distilled ? 1.0 : 4.0)
         p.seed = seed
         let (cond, uncond) = promptPair(tok, prompt, negative, cfg: p.cfgScale)
         let t0 = Date()
@@ -982,6 +1051,8 @@ actor Core {
         guard targetPixels > 0 else {
             throw RequestError.bad("target_pixels \(targetPixels) must be positive")
         }
+        let cfgOverride = try validatedGuidance(request, "cfg")
+        let imgCfgOverride = try validatedGuidance(request, "img_cfg")
         // Before ensureLoaded for the same reason as the sizes: a bad path is not worth
         // a 33 GiB load, and decoding needs no weights.
         let images = try loadReferences(request)
@@ -991,7 +1062,7 @@ actor Core {
         let tok = resident.tokenizer
         var p = T2IParams()
         p.numSteps = stepsArg ?? 50
-        p.cfgScale = Float(try doubleArgStrict(request, "cfg") ?? 4.0)
+        p.cfgScale = cfgOverride ?? 4.0
         p.seed = seed
         let counts = images.map(\.tokenCount)
         var width = widthArg
@@ -1011,7 +1082,7 @@ actor Core {
         let image = try m.it2iGenerate(
             condIds: condIds, imgCondIds: imgCondIds, uncondIds: nil, images: images,
             width: width, height: height, params: p,
-            imgCfgScale: Float(try doubleArgStrict(request, "img_cfg") ?? 1.0),
+            imgCfgScale: imgCfgOverride ?? 1.0,
             onStep: { step, _ in jobProgress.advance(step) })
         eval(image)
         let seconds = Date().timeIntervalSince(t0)
@@ -1034,7 +1105,7 @@ actor Core {
             tool: "edit_image", prompt: prompt, negative: "", seed: p.seed,
             seedExplicit: seedExplicit, width: width, height: height, steps: p.numSteps,
             cfg: Double(p.cfgScale), resident: resident, wanted: wanted, seconds: seconds,
-            extra: ["img_cfg": try doubleArgStrict(request, "img_cfg") ?? 1.0,
+            extra: ["img_cfg": imgCfgOverride ?? 1.0,
                     "source_images": references])) {
             out["metadata"] = sidecar.path
         }
@@ -1096,8 +1167,33 @@ actor Core {
 
 // MARK: - helpers and socket plumbing
 
+/// Writes every byte, or reports that this descriptor refused them — and never raises.
+/// `FileHandle.write` raises an Objective-C exception when a write fails, which Swift
+/// cannot catch, so one log line could take the whole shared service down. Measured
+/// 2026-09-19: a daemon whose log reader went away died with SIGABRT on its next line
+/// (`_objc_terminate` under `-[NSConcreteFileHandle writeData:]`); the same crash
+/// reached the MCP front end twice that day. A full disk, an unlinked log file or a
+/// closed descriptor must cost a line, not the process that holds the weights.
+func writeAll(_ fd: Int32, _ data: Data) -> Bool {
+    var sent = 0
+    return data.withUnsafeBytes { raw -> Bool in
+        guard let base = raw.baseAddress else { return data.isEmpty }
+        while sent < raw.count {
+            let n = write(fd, base.advanced(by: sent), raw.count - sent)
+            if n > 0 {
+                sent += n
+            } else if n < 0 && errno == EINTR {
+                continue
+            } else {
+                return false
+            }
+        }
+        return true
+    }
+}
+
 func log(_ message: String) {
-    FileHandle.standardError.write("imagehived: \(message)\n".data(using: .utf8)!)
+    _ = writeAll(STDERR_FILENO, Data("imagehived: \(message)\n".utf8))
 }
 
 @discardableResult
@@ -1139,7 +1235,10 @@ func openListener(_ path: String) -> Int32? {
         return nil
     }
     let bound = withSockaddr(path) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
-    guard bound == 0, listen(fd, 16) == 0 else {
+    // The backlog has to cover `maximumConnections` below, or a burst of parallel
+    // clients is refused by the kernel before the accept loop can answer it: measured
+    // 2026-09-19, 70 rapid connects died at 24 with a backlog of 16.
+    guard bound == 0, listen(fd, 128) == 0 else {
         log("could not bind \(path): \(String(cString: strerror(errno)))")
         close(fd)
         return nil
@@ -1213,7 +1312,18 @@ final class Connection {
         self.core = core
     }
 
-    func start() {
+    /// One line, then close. Used to refuse a connection instead of dropping it: the
+    /// protocol is one JSON object per line and a caller that gets nothing waits out its
+    /// whole deadline, so a refusal has to say why.
+    func refuse(_ reason: String) {
+        var out = (try? JSONSerialization.data(withJSONObject: ["ok": false, "error": reason] as [String: Any]))
+            ?? Data(#"{"ok":false,"error":"too many clients"}"#.utf8)
+        out.append(0x0A)
+        _ = writeAll(fd, out)
+        close(fd)
+    }
+
+    func start(onFinish: @escaping () -> Void) {
         // Borrowed into locals so the closures below need no implicit `self`.
         let fd = self.fd
         let core = self.core
@@ -1224,14 +1334,10 @@ final class Connection {
                 writeQueue.sync {
                     var out = data
                     out.append(0x0A)
-                    out.withUnsafeBytes { raw in
-                        var offset = 0
-                        while offset < raw.count {
-                            let written = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
-                            if written <= 0 { return }
-                            offset += written
-                        }
-                    }
+                    // `writeAll` retries EINTR and reports a peer that stopped reading;
+                    // a reply that cannot be delivered is not an error worth tearing the
+                    // connection down over, and a short write must still finish the line.
+                    _ = writeAll(fd, out)
                 }
             }
             func sendError(_ message: String) {
@@ -1242,6 +1348,9 @@ final class Connection {
             var chunk = [UInt8](repeating: 0, count: 64 * 1024)
             while true {
                 let n = read(fd, &chunk, chunk.count)
+                // An interrupted read is not a client that went away: without this the
+                // connection was dropped and the log blamed a request with no newline.
+                if n < 0 && errno == EINTR { continue }
                 if n <= 0 {
                     // A client that sends a request without the terminating newline and
                     // then closes used to vanish silently; say so in the log, because
@@ -1285,11 +1394,38 @@ final class Connection {
                 }
             }
             close(fd)
+            onFinish()
         }
         thread.stackSize = 1 << 20
         thread.start()
     }
 }
+
+/// How many clients may hold a connection at once. Each one costs a thread parked in
+/// `read`, and nothing else in this process is bounded: a client that leaks connections
+/// (a loop, a crash that never closes, a tool that opens a socket per request) could
+/// otherwise grow the daemon without limit. 64 is far above any real setup — a front end
+/// holds exactly one connection for the life of a session, and generations are
+/// serialized inside the actor anyway.
+let maximumConnections = 64
+
+final class ConnectionCount {
+    private let lock = NSLock()
+    private var live = 0
+
+    func take() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard live < maximumConnections else { return false }
+        live += 1
+        return true
+    }
+
+    func release() {
+        lock.lock(); live -= 1; lock.unlock()
+    }
+}
+
+let connectionCount = ConnectionCount()
 
 let acceptThread = Thread {
     while true {
@@ -1299,7 +1435,13 @@ let acceptThread = Thread {
             Thread.sleep(forTimeInterval: 0.2)
             continue
         }
-        Connection(fd: client, core: core).start()
+        let connection = Connection(fd: client, core: core)
+        guard connectionCount.take() else {
+            connection.refuse("too many clients: \(maximumConnections) connections are already open. "
+                + "The service serializes generations, so one connection per client is enough.")
+            continue
+        }
+        connection.start { connectionCount.release() }
     }
 }
 acceptThread.stackSize = 1 << 20

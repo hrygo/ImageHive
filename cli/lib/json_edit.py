@@ -16,6 +16,11 @@ import json
 import os
 import sys
 
+# Sibling module, so an invocation by path (`python3 cli/lib/json_edit.py …`) and one
+# by `-m` both find it.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from atomic_write import write_text  # noqa: E402  (needs the path above first)
+
 
 def client_entry(flavor, command, env):
     """The entry shape each client expects. Keep them here, not in shell."""
@@ -47,9 +52,7 @@ def load(path):
 
 def store(path, data):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as handle:
-        json.dump(data, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
+    write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def walk(data, path, create):

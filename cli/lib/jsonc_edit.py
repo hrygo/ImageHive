@@ -25,6 +25,11 @@ import os
 import re
 import sys
 
+# Sibling module, so an invocation by path (`python3 cli/lib/jsonc_edit.py …`) and one
+# by `-m` both find it.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from atomic_write import write_text  # noqa: E402  (needs the path above first)
+
 BEGIN = "// imagehive:begin (managed by `imagehive clients`)"
 END = "// imagehive:end"
 KEY = "imagehive"
@@ -208,7 +213,7 @@ def insert(path, mcp, home, daemon):
     open_index, close_index = _find_object(lines, "mcp")
     lines = _normalise_commas(lines, open_index, close_index)
 
-    open(path, "w").write("\n".join(lines))
+    write_text(path, "\n".join(lines))
     if removed:
         print(f"replaced {removed} previous imagehive entr{'y' if removed == 1 else 'ies'}", file=sys.stderr)
 
@@ -222,7 +227,7 @@ def remove(path):
     # change worth writing even though no whole block was removed.
     if lines == original:
         return
-    open(path, "w").write("\n".join(lines))
+    write_text(path, "\n".join(lines))
 
 
 def main(argv):

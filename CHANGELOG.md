@@ -42,9 +42,59 @@ GitHub Release 上。Release 页面承载资产与简短公告，本文件是长
   `printf("MLX error: …"); exit(-1)` 打的，走 stdout；测试脚本与 `verify_release.sh` 只收
   stderr，于是"进程中途消失"只剩一个空日志。launchd job 与 MCP 前端本来就让两个流去同一个
   文件，这一改是让"只收 stderr"的调用方也不再丢线索。
+* **一行日志不再能杀死进程。** 两个程序都用自己的 `FileHandle` 写日志，而 `FileHandle`
+  在写入失败时抛的是 Objective-C 异常——Swift 接不住，于是"客户端把管道的读端关了"这件事
+  以 `SIGABRT` 的形式落在进程头上。实测 2026-09-19：一小时内两份 `imagehive-mcp` 崩溃
+  报告，栈都是 `log(_:)` → `-[NSConcreteFileHandle writeData:]` → `_objc_terminate`，一份
+  死在启动后 0.13 秒的 "ready" 那一行（客户端连握手都没等到），另一份死在 "stdin closed,
+  exiting"；守护进程走同一条路径会带走唯一持有权重的那个进程（复现：读端关掉的日志管道上
+  一条 `status` 无尾换行、客户端断开，触发它的日志行，进程 `-6`）。现在两者自己的输出
+  （stderr 日志与 stdout 协议）只走 `write(2)`：EINTR 重试，其余失败一律返回 false。日志
+  写失败只丢一行；stdout 写失败等于 MCP 传输已断，干净退出 0 而不是 abort；同时
+  `signal(SIGPIPE, SIG_IGN)` 提前到写出第一个字节之前，`--status` 这类先碰 socket 的路径
+  不再可能被 SIGPIPE 带走。系统升级后客户端批量重启是最典型的触发场景，这一改让它只损失
+  日志行。
+* **一条请求不再能用数字把守护进程打死。** `intArgStrict` 对 JSON 里的浮点数直接做
+  `Int(d)`，而这不是转换是陷阱：越界就是 Swift 的 fatal error，进程带着 `SIGTRAP` 消失、
+  日志里一个字都不留。实测 2026-09-19（全新沙箱守护进程，逐个输入单独起一次）：
+  `{"width": 1e30}`、`{"steps": 1e19}`、`{"seed": 1e19}`、`{"width": 9223372036854775808}`
+  四条各自把守护进程打死，`rc=-5`、无日志、无回包——与 `[reshape]` 那条同属"被拒的请求
+  带走了共用服务"。现在超过 2^53 的 JSON 数字（再大就不再精确表示某个整数，正是"发送的值
+  不是我收到的值"那类静默漂移）在**加载任何东西之前**被拒绝，消息给出上限与实际能用的写法。
+  同一轮审查里，`writePNG` 的 `Int((v * 255).rounded())` 也补了非有限值保护：模型若给出
+  NaN/inf，以前会在**出完图之后** trap，现在按它最接近的极值落盘。
+* **guidance 有了公开的范围。** `cfg` / `img_cfg` 以前只检查"是不是数字"，
+  `{"cfg": 1e30}` 会变成 `Float.inf` 送进模型、`{"cfg": 101}` 也照跑。现在两者都限定在
+  `0...100`（fast 默认 1.0、quality 默认 4.0），三处同时说明：守护进程的校验、`options`
+  的 `cfg.minimum/maximum`、工具的 inputSchema，以及 `cli/imagehive` 的本地检查（笔误不必
+  往返一趟）。
+* **自己的输出不会再写进别人的 fd。** 进程启动时先把 0/1/2 补齐（缺的那个打开
+  `/dev/null`），因为"最低空闲 fd"可能就是下一个 socket：实测 2026-09-19，一个 stderr 被
+  调用方关掉的前端把 `imagehive-mcp: ignoring notification …` 写进了自己的 daemon socket，
+  守护进程把它当成一条请求、回 `unknown cmd ''`，客户端于是把这条错误当成了**下一次调用**
+  的答复。守护进程开 `2>&-` 时同样会把监听 socket 落在 fd 2 上。现在那种 fd 是
+  `/dev/null`，日志最坏只是丢一行。顺带把两处 `read` 的 EINTR 与守护进程每条连接的写循环
+  统一到 `writeAll`：信号打断不再被当成"对端走了"。
+* **连接有了上限，拒绝会说明原因。** 每条连接一个线程停在 `read`，此前没有任何上限——一个
+  泄漏连接的客户端就能让守护进程无界增长。现在最多 64 条，超出时回一条
+  `too many clients: …` 再关闭（不回答会让人等满超时），并把 listen backlog 从 16 提到
+  128——实测 70 次快速连接在 backlog 16 时于第 24 条就被内核挡掉了。
+* **用户配置与安装产物都改成原子替换。** 客户端接线的 `json_edit.py` / `jsonc_edit.py`
+  以前是 `open(path, "w").write(...)`：先截断再写，进程中途死掉就把用户的
+  `opencode.json` 之类留成半截文件——那是用户编辑器设置的唯一副本。现在写同目录临时文件、
+  fsync、保留原权限、`os.replace` 覆盖（`cli/lib/atomic_write.py`），失败时原文件一个字节
+  都不动。`install.sh` 的二进制与 MLX bundle 同样改为"先复制、后改名"，中断的安装不再留下
+  截断的可执行文件或半个 bundle。
 
 ### 文档与测试
 
+* `Tests/smoke.sh` 新增断言（`--quick` 也跑，CI 每次 push 都过）：关掉的 stderr、读端已关
+  的日志管道、读端已关的 stdout 三种死法下，前端仍能应答 `ping`、守护进程仍能应答
+  `status`，两者都以状态 0 退出。
+* `Tests/smoke.sh` 另加一组：四种曾经致命的数字请求都必须变成普通错误且守护进程存活、
+  stderr 被关掉的前端不能把日志写进协议流（两次调用都要拿到正常结果）、连接上限会拒绝并
+  恢复；`Tests/cli.sh` 断言 `--cfg` 越界在本地就被拒；`Tests/rename.sh` 断言接线是整体替换
+  而不是就地重写，且写不成时原文件逐字节不变、不留临时文件。
 * `Tests/cli.sh` 的 `fail()` 现在能说完话：两条 `printf '--- …'` 少了 `--`，bash 3.2 把
   以 `-` 开头的格式当选项、函数带着状态 2 退出，"守护进程还在不在"从来没打印过（CI 日志
   末行就是那条 `printf: --: invalid option`）。现在还会报 `wait` 状态（崩溃是 128+signal）

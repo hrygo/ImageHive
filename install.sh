@@ -489,14 +489,26 @@ install_binaries() {
   [ "$DO_BUILD" = "no" ] && out="$REPO_DIR/prebuilt"
   [ -x "$out/imagehived" ] || die "missing build product: $out/imagehived"
 
-  run install -m 0755 "$out/imagehived" "$bin/imagehived"
-  run install -m 0755 "$out/imagehive-mcp" "$bin/imagehive-mcp"
+  # Copy beside the destination and rename, rather than `install` straight onto it: a
+  # copy in place truncates first, so an interrupted install (Ctrl-C, a full disk, a
+  # closed terminal window) leaves a shortened binary where the launchd job and every
+  # MCP entry expect a working one. The rename is atomic, so the file is always either
+  # the old build or the new one.
+  local product
+  for product in imagehived imagehive-mcp; do
+    run install -m 0755 "$out/$product" "$bin/.$product.new"
+    run mv -f "$bin/.$product.new" "$bin/$product"
+  done
   if [ "$DRY_RUN" = "0" ]; then
     local bundle
   for bundle in "$out"/*.bundle; do
     [ -e "$bundle" ] || continue
+    # Same reason as the binaries: copy first, then swap, so the window in which the
+    # bundle is missing or half-written is one rename instead of the whole copy. A
+    # daemon that loads in that window dies with "Failed to load the default metallib".
+    cp -R "$bundle" "$bin/.$(basename "$bundle").new"
     rm -rf "$bin/$(basename "$bundle")"
-    cp -R "$bundle" "$bin/"
+    mv "$bin/.$(basename "$bundle").new" "$bin/$(basename "$bundle")"
   done
   fi
   dequarantine "$bin/imagehived" "$bin/imagehive-mcp" "$bin"/*.bundle

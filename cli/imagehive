@@ -517,6 +517,11 @@ cmd_generate() {
   [ -z "$steps" ] || case "$steps" in *[!0-9]*) die "--steps expects an integer (got '$steps')" ;; esac
   [ -z "$steps" ] || { [ "$steps" -ge 1 ] && [ "$steps" -le 500 ]; } \
     || die "--steps must be between 1 and 500"
+  # Same rule as the daemon's validatedGuidance: the model has no use for a scale
+  # outside 0...100, and a typo should not need a round trip to find out.
+  [ -z "$cfg" ] || case "$cfg" in *[!0-9.]*|*.*.*) die "--cfg expects a number (got '$cfg')" ;; esac
+  [ -z "$cfg" ] || LC_ALL=C awk -v value="$cfg" 'BEGIN { exit !(value >= 0 && value <= 100) }' \
+    || die "--cfg must be between 0 and 100 (fast default 1.0, quality default 4.0)"
   ih_check_size "$width" width
   ih_check_size "$height" height
   # Whatever is installed decides the default; the daemon would fall back to it

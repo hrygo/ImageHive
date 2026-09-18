@@ -117,6 +117,215 @@ case "$tools" in *generate_image*edit_image*describe_image*model_options*model_s
 echo "   tools: $tools"
 case "$versions" in *2026-07-28*) echo "   server/discover: $versions";; *) fail "server/discover did not advertise 2026-07-28";; esac
 
+echo "== a log channel that goes away costs a log line, not the process"
+# Both binaries used to write their own log lines through `FileHandle`, which raises
+# an Objective-C exception when the write fails — and Swift cannot catch that, so the
+# next log line after a client went away was SIGABRT. Measured 2026-09-19: two
+# imagehive-mcp crash reports inside one hour, one of them 0.13 s after launch, on the
+# "ready" line; the same code path in the daemon kills the one process that holds the
+# weights. Neither may ever die of a log line.
+"$mcp" 2>&- </dev/null || fail "imagehive-mcp cannot start with no stderr at all"
+python3 - "$mcp" "$served" "$work" <<'PY' || fail "a dead log channel took the process with it"
+import os, socket, subprocess, sys, tempfile, time
+
+mcp, daemon, work = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def closed_pipe():
+    """A pipe whose reader is already gone: writing to it fails with EPIPE."""
+    read_end, write_end = os.pipe()
+    os.close(read_end)
+    return write_end
+
+
+# The front end: the client closes its log pipe, then keeps talking. It also used to
+# die right here at startup, before its first byte of protocol.
+front_end = subprocess.Popen([mcp], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=closed_pipe())
+front_end.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/unknown"}\n')
+front_end.stdin.flush()
+time.sleep(0.5)
+assert front_end.poll() is None, "the front end died on a log write (rc=%r)" % front_end.poll()
+front_end.stdin.write(b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n')
+front_end.stdin.flush()
+reply = front_end.stdout.readline()
+assert b'"id":1' in reply, "the front end logged once and then stopped answering: %r" % reply
+front_end.stdin.close()
+assert front_end.wait(timeout=10) == 0, "the front end did not exit cleanly"
+
+# The client closes stdout instead: the MCP transport is gone, so leave — cleanly.
+no_stdout = subprocess.Popen([mcp], stdin=subprocess.PIPE, stdout=closed_pipe(),
+                             stderr=subprocess.DEVNULL)
+no_stdout.stdin.write(b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n')
+no_stdout.stdin.flush()
+assert no_stdout.wait(timeout=10) == 0, "a closed stdout produced rc=%r" % no_stdout.returncode
+
+# The daemon: its log file sits on a disk that can fill up, and it is the only process
+# holding the weights. Pointed at artifacts that do not exist so it cannot load one.
+home = tempfile.mkdtemp(dir=work)
+env = dict(os.environ,
+           IMAGEHIVE_HOME=home,
+           IMAGEHIVE_SOCKET=os.path.join(home, "robust.sock"),
+           IMAGEHIVE_FAST_ARTIFACT=os.path.join(home, "no-fast-artifact"),
+           IMAGEHIVE_QUALITY_ARTIFACT=os.path.join(home, "no-quality-artifact"))
+daemon_proc = subprocess.Popen([daemon], env=env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=closed_pipe())
+deadline = time.time() + 20
+while time.time() < deadline and not os.path.exists(env["IMAGEHIVE_SOCKET"]):
+    time.sleep(0.25)
+assert os.path.exists(env["IMAGEHIVE_SOCKET"]), "the daemon never bound its socket"
+try:
+    # A request without the terminating newline makes the daemon log as the client goes.
+    partial = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    partial.connect(env["IMAGEHIVE_SOCKET"])
+    partial.sendall(b'{"cmd": "status"}')
+    partial.close()
+    time.sleep(0.5)
+    assert daemon_proc.poll() is None, "the daemon died on a log write (rc=%r)" % daemon_proc.poll()
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.connect(env["IMAGEHIVE_SOCKET"])
+    probe.sendall(b'{"cmd": "status"}\n')
+    answer = probe.recv(200)
+    probe.close()
+    assert b'"resident_tier"' in answer, "the daemon stopped answering: %r" % answer
+    print("   three dead log channels survived: the front end still answers ping, "
+          "the daemon still answers status")
+finally:
+    daemon_proc.terminate()
+    assert daemon_proc.wait(timeout=15) == 0, "the daemon did not exit cleanly on SIGTERM"
+PY
+
+echo "== what a client can send, and what it must never be able to do"
+# Three ways one request used to be able to take the shared service down, or to reach
+# past it, all measured 2026-09-19:
+#   * a JSON number too large to be an Int (`1e30`, `1e19`, `9223372036854775808`) hit
+#     Swift's `Int(Double)` trap — SIGTRAP, an empty log, every other client's model
+#     gone. Refusing it has to be an ordinary error, answered before any load;
+#   * a front end started with stderr closed let its *daemon socket* land on descriptor
+#     2, so the next log line was written into the protocol stream and the caller got
+#     `unknown cmd ''` back for its next call;
+#   * connections had no ceiling at all: every one costs a thread parked in `read`.
+python3 - "$mcp" "$served" "$work" <<'PY' || fail "a client could still reach past the service"
+import json, os, socket, subprocess, sys, tempfile, time
+
+mcp, daemon, work = sys.argv[1], sys.argv[2], sys.argv[3]
+home = tempfile.mkdtemp(dir=work)
+env = dict(os.environ,
+           IMAGEHIVE_HOME=home,
+           IMAGEHIVE_SOCKET=os.path.join(home, "audit.sock"),
+           IMAGEHIVE_DAEMON_BIN=os.path.abspath(daemon),
+           IMAGEHIVE_FAST_ARTIFACT=os.path.join(home, "no-fast-artifact"),
+           IMAGEHIVE_QUALITY_ARTIFACT=os.path.join(home, "no-quality-artifact"))
+log_path = os.path.join(home, "daemon.log")
+log = open(log_path, "w")
+serving = subprocess.Popen([daemon], env=env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=log)
+deadline = time.time() + 20
+while time.time() < deadline and not os.path.exists(env["IMAGEHIVE_SOCKET"]):
+    time.sleep(0.25)
+assert os.path.exists(env["IMAGEHIVE_SOCKET"]), "the daemon never bound its socket"
+
+
+def front_end(stderr_fd):
+    return subprocess.Popen([mcp], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=stderr_fd)
+
+
+def ask(process, message):
+    process.stdin.write(json.dumps(message).encode() + b"\n")
+    process.stdin.flush()
+    line = process.stdout.readline()
+    assert line, "no reply from the front end"
+    return json.loads(line)
+
+
+def notify(process, method):
+    """A notification has no reply, so this one must not read a line."""
+    process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method}).encode() + b"\n")
+    process.stdin.flush()
+
+
+def tool_call(process, arguments, ident):
+    # json.dumps writes a Python float as a bare JSON number (`1e+30`), which is exactly
+    # the shape a client sends by accident.
+    message = {"jsonrpc": "2.0", "id": ident, "method": "tools/call",
+               "params": {"name": "generate_image",
+                          "arguments": dict({"prompt": "audit probe"}, **arguments)}}
+    process.stdin.write(json.dumps(message).encode() + b"\n")
+    process.stdin.flush()
+    return json.loads(process.stdout.readline())
+
+
+client = front_end(subprocess.DEVNULL)
+for ident, arguments, expected in [
+    (1, {"width": 1e30}, "too large to be an exact whole number"),
+    (2, {"steps": 1e19}, "too large to be an exact whole number"),
+    (3, {"seed": 9223372036854775808}, "too large to be an exact whole number"),
+    (4, {"cfg": 1e30}, "outside the supported range"),
+    (5, {"cfg": 101}, "outside the supported range"),
+]:
+    result = tool_call(client, arguments, ident)["result"]
+    text = result["content"][0]["text"]
+    assert result.get("isError") and expected in text, (arguments, text)
+    assert serving.poll() is None, "the daemon died on %r" % (arguments,)
+print("   four numbers that used to be fatal are ordinary errors now")
+
+status = ask(client, {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                      "params": {"name": "model_status"}})
+assert status["result"].get("isError") is False, status
+client.stdin.close(); client.wait(timeout=10)
+
+# A front end started with stderr closed: descriptor 2 is free, so whatever opens next
+# would land on it. It has to be /dev/null, never the daemon socket — that is how the
+# second call here came back as `unknown cmd ''` before.
+quiet = subprocess.Popen(["/bin/bash", "-c", 'exec 2>&-; exec "$0"', mcp], env=env,
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+notify(quiet, "notifications/unknown")
+first = ask(quiet, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "model_status"}})
+notify(quiet, "notifications/unknown-2")
+second = ask(quiet, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                     "params": {"name": "model_status"}})
+for reply in (first, second):
+    assert reply["result"].get("structuredContent", {}).get("resident_tier"), reply
+quiet.stdin.close(); quiet.wait(timeout=10)
+print("   a client with no stderr cannot write its log into the socket")
+
+# Connections: the ceiling is not a number this test hardcodes, it is "there is one".
+held, refusal = [], ""
+for _ in range(200):
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.settimeout(3)
+    try:
+        connection.connect(env["IMAGEHIVE_SOCKET"])
+        connection.sendall(b'{"cmd": "status"}\n')
+        answer = connection.recv(300).decode(errors="replace")
+    except OSError:
+        connection.close()
+        break
+    if "too many clients" in answer:
+        refusal = answer
+        connection.close()
+        break
+    held.append(connection)
+assert refusal, "200 connections were accepted; there is no ceiling"
+held[0].sendall(b'{"cmd": "status"}\n')
+assert b'"resident_tier"' in held[0].recv(300), "the first client was refused as well"
+for connection in held:
+    connection.close()
+time.sleep(0.5)
+probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+probe.connect(env["IMAGEHIVE_SOCKET"])
+probe.sendall(b'{"cmd": "status"}\n')
+assert b'"resident_tier"' in probe.recv(300), "the service did not recover after the burst"
+probe.close()
+print("   the connection ceiling refuses with a message (%s) and recovers" % refusal[:46])
+
+serving.terminate()
+assert serving.wait(timeout=15) == 0, "the daemon did not exit cleanly"
+log.close()
+PY
+
 echo "== daemon lifecycle"
 # A config.json that exists but cannot be parsed used to be indistinguishable from no
 # file at all: every setting in it was dropped and the daemon served the built-in

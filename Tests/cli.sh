@@ -113,6 +113,20 @@ case "$generate_help" in
   *"multiples of 32"*) ;;
   *) fail "generate --help does not state the size rule" ;;
 esac
+# The daemon refuses a guidance scale outside 0...100 (validatedGuidance). The CLI says
+# so first, so a typo does not need a round trip — and like every other rule here, the
+# message has to name a legal value.
+bad_cfg="$("${cli[@]}" generate --prompt x --cfg 101 2>&1 || true)"
+case "$bad_cfg" in
+  *"--cfg must be between 0 and 100"*) ;;
+  *) fail "an out-of-range --cfg was not refused locally: $bad_cfg" ;;
+esac
+bad_cfg="$("${cli[@]}" generate --prompt x --cfg 1e30 2>&1 || true)"
+case "$bad_cfg" in
+  *"--cfg expects a number"*) ;;
+  *) fail "a non-numeric --cfg was not refused locally: $bad_cfg" ;;
+esac
+echo "   --cfg outside 0...100 is refused before the socket is touched"
 models_help="$("${cli[@]}" models --help)"
 case "$models_help" in
   *"models pull"*) ;;

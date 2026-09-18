@@ -33,6 +33,41 @@ model cannot run at all, and the first real generation is where it stops. Reques
 refused before any weights are loaded no longer reach MLX (fixed 2026-09-18), so
 `status`, `options` and a mistyped argument are answered normally even there.
 
+**A crash report for `imagehive-mcp` with `-[NSConcreteFileHandle writeData:]` in the stack.**
+That was the front end writing a log line into a client that had already gone away, with
+the write being fatal instead of dropped: `FileHandle.write` raises an Objective-C
+exception when the descriptor refuses the bytes and Swift cannot catch it, so the process
+aborted (SIGABRT under `_objc_terminate`). Both crash reports from 2026-09-19 sit on a log
+line — one 0.13 s after launch, on "ready", the other on "stdin closed, exiting" — which
+is what makes a client restart (a system upgrade restarts every MCP client at once) look
+like a broken front end. The daemon carried the same defect and it was the worse one:
+there, a failed log line takes the single process that holds the weights with it.
+Fixed 2026-09-19. Both programs now write their own output through `write(2)` only: a
+failed log line is dropped, a failed stdout means the client is gone and exits 0, and
+SIGPIPE is ignored before the first byte. Re-run `./install.sh` to pick it up — the crash
+reports already on disk are harmless.
+
+**The daemon disappears mid-request with nothing in the log at all, and `wait` says
+`-5`/`SIGTRAP`.**
+It read a JSON number it could not convert. `Int(Double)` is a trap, not a conversion:
+past `Int`'s range a Swift fatal error ends the process before anything can log it, so
+one request took the shared service with it. A whole family of ordinary-looking values
+did this on builds before 0.6.1 (`"width": 1e30`, `"steps": 1e19`, `"seed": 1e19`,
+`9223372036854775808`; measured 2026-09-19, one fresh daemon per input, every one
+`rc=-5`). Fixed 2026-09-19: a number above 2^53 — past which JSON no longer names one
+exact integer — is refused with an ordinary error, before anything is loaded. Re-run
+`./install.sh` to pick it up.
+
+**A tool call comes back with `unknown cmd ''`, or an answer that belongs to an earlier
+call.**
+Something wrote outside the protocol. The front end's own log lines went into the daemon
+socket when the process was started with stderr closed: descriptor 2 was free, the next
+`open`/`socket` took it, and `imagehive-mcp: ignoring notification …` arrived at the
+daemon as a request — which answered `unknown cmd ''`, and that reply was handed to the
+caller as the result of its *next* tool call (measured 2026-09-19). Both binaries now
+open `/dev/null` onto any of 0/1/2 that is missing before they open anything of their
+own. Fixed 2026-09-19; re-run `./install.sh`.
+
 **The build stops early with a Metal or `metal` compiler error.**
 Xcode 27 ships the Metal toolchain as a separate component:
 
