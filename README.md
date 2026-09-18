@@ -3,6 +3,11 @@
 > [中文文档](README.zh-CN.md) · Chinese guide: [README.zh-CN.md](README.zh-CN.md),
 > [Docs/DISTRIBUTING.zh-CN.md](Docs/DISTRIBUTING.zh-CN.md). English is the
 > authoritative version.
+>
+> Versioning: this fork numbers its own releases (`SV_VERSION` in
+> `cli/lib/common.sh`); the upstream commit it is based on is recorded in
+> `BUILD-INFO.txt` inside each release archive, and the two numbering schemes are
+> independent.
 
 Text-to-image, instruction-based image editing and image understanding for your
 own Mac — served to AI agents over MCP. No API key, no per-image cost, no uploads:

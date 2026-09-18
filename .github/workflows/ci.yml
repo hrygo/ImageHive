@@ -5,10 +5,18 @@ name: ci
 # version label such as `macos-26` fails to schedule at all when the label does
 # not exist yet (measured: both jobs failed with zero steps), so the workflow
 # asserts the SDK version instead of trusting the label.
+#
+# Trigger is manual for now. On this account *no* job can start, macOS or Linux
+# (measured: a probe matrix of ubuntu-latest + macos-latest both failed with zero
+# steps), which is an Actions minutes / billing setting on the account rather than
+# anything in this file. Until that is sorted, every push would only produce a red
+# cross. Run it by hand with:
+#
+#     gh workflow run ci --repo <owner>/SenseNovaU1-Service
+#
+# or add `push:` back to `on:` once the account can run jobs. Either way the
+# authoritative gate is local: `make test` and `make release-verify`.
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 concurrency:
