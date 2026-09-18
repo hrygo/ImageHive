@@ -7,6 +7,8 @@
 - 上游基线：`96a0c9b`（`origin/main`），我们的提交全部在 `local/main` 分支上。
 - 相关设计、验收记录与机器接线见 `本机优化配置` 仓库
   `docs/superpowers/specs/2026-09-18-sensenova-u15-local-image-service-design.md`。
+- 除服务本体外，本分支还带上了分发用的外壳：`install.sh` / `uninstall.sh`、
+  管理命令 `cli/sensenova-u1`、面向使用者的 `README.md` 与 `Docs/`。
 
 ## 目录
 
@@ -14,16 +16,21 @@
 |---|---|
 | `Sources/sensenova-served/` | 守护进程：唯一持有权重，串行生成，空闲 TTL 卸载，socket 绑定即单实例互斥 |
 | `Sources/sensenova-mcp/` | stdio MCP 前端：无状态、不加载权重，把工具调用转成 socket 请求；连不上时按需拉起守护进程 |
+| `install.sh` / `uninstall.sh` | 安装与卸载：preflight、制品下载、构建、安装、LaunchAgent、客户端接线、冒烟 |
+| `cli/sensenova-u1` | 管理命令：`status`/`doctor`/`models`/`clients`/`generate`/`config` 等 |
 | `Package.swift` | 相对上游的两处改动：新增上述两个 executable target |
-| `scripts/deploy.sh` | 构建两个产物、安装到 `$SENSENOVA_HOME/bin`，并在已安装 LaunchAgent 时重启服务 |
+| `scripts/deploy.sh` | 兼容入口：等价于 `install.sh --model none --clients none`（构建 + 安装到 `$SENSENOVA_HOME/bin` + 重启） |
 
 ## 构建与运行
 
 ```bash
+# 推荐：一条命令装好（preflight → 制品 → 构建 → 安装 → 接线 → 冒烟）
+./install.sh
+
 swift build -c release --product sensenova-served
 swift build -c release --product sensenova-mcp
 
-# 或者一步到位：构建 + 安装到 $SENSENOVA_HOME/bin + 重启 LaunchAgent（若已安装）
+# 只重建并重装本机已装的产物（不下载模型、不接线）
 ./scripts/deploy.sh
 
 # 守护进程（前台运行；正常由 launchd 或 MCP 前端拉起）
