@@ -84,6 +84,42 @@ step becomes redundant for the binaries (the flag would still be cleared).
    `~/Library/Application Support/SenseNovaU1/models/` and run
    `bash install.sh --model none` — it keeps what is already on disk.
 
+## Cutting a release
+
+The version is `SV_VERSION` in `cli/lib/common.sh` — bump it, then:
+
+```bash
+make release-verify        # builds dist/, installs the tarball into a throwaway HOME
+V=0.5.2
+git tag -a "v$V" -m "…" && git push origin "v$V"
+gh release create "v$V" --repo hrygo/SenseNovaU1-Service --title "…" --notes-file - \
+  "dist/sensenova-u1-$V-macos-arm64.tar.gz" \
+  "dist/sensenova-u1-$V-macos-arm64.tar.gz.sha256" \
+  dist/sensenova-u1-macos-arm64.tar.gz \
+  dist/sensenova-u1-macos-arm64.tar.gz.sha256
+```
+
+Four things that are easy to get wrong, all learned the hard way:
+
+* **Tag first, then build.** `BUILD-INFO.txt` records `git describe`, so building
+  before the tag ships an archive that says `revision v0.5.0-18-gc8679f9` instead of
+  `v0.5.2` — the number a user picks to compare against `project_version`.
+* **Upload the stable name as well.** `releases/latest/download/sensenova-u1-macos-arm64.tar.gz`
+  is what the README tells people to `curl`, and it only resolves because some release
+  carries an asset with exactly that name.
+* **Pass `--repo hrygo/SenseNovaU1-Service`.** This checkout also has `upstream`
+  (the fork's parent), and `gh` resolves the repository to it by default: the create
+  fails with "tag … has not been pushed to xocialize/sensenova-u1-swift", or lands in
+  the wrong place if a matching tag exists there.
+* **Then check it the way a user would** — download the stable name anonymously and
+  compare against the `.sha256` asset, rather than trusting the upload:
+
+```bash
+base=https://github.com/hrygo/SenseNovaU1-Service/releases/latest/download
+curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz{,.sha256}"
+shasum -a 256 -c sensenova-u1-macos-arm64.tar.gz.sha256
+```
+
 ## Checklist before handing it over
 
 - [ ] `make release-verify` passes (it installs the tarball into a throwaway HOME,

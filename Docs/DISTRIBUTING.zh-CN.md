@@ -76,6 +76,40 @@ bash install.sh
    `~/Library/Application Support/SenseNovaU1/models/`，然后
    `bash install.sh --model none` —— 它会保留磁盘上已有的东西。
 
+## 怎么发一个版本
+
+版本号来自 `cli/lib/common.sh` 的 `SV_VERSION`，先改它，然后：
+
+```bash
+make release-verify        # 生成 dist/，并把归档装进一个一次性 HOME 里验证
+V=0.5.2
+git tag -a "v$V" -m "…" && git push origin "v$V"
+gh release create "v$V" --repo hrygo/SenseNovaU1-Service --title "…" --notes-file - \
+  "dist/sensenova-u1-$V-macos-arm64.tar.gz" \
+  "dist/sensenova-u1-$V-macos-arm64.tar.gz.sha256" \
+  dist/sensenova-u1-macos-arm64.tar.gz \
+  dist/sensenova-u1-macos-arm64.tar.gz.sha256
+```
+
+四个容易踩的点（都是实际踩过的）：
+
+* **先打 tag 再出包**：`BUILD-INFO.txt` 记的是 `git describe`，先出包再打 tag 会让归档里
+  写成 `revision v0.5.0-18-gc8679f9` 而不是 `v0.5.2` —— 用户正是拿这个号和
+  `project_version` 对账。
+* **稳定名的那份也要传**：README 让人 `curl` 的是
+  `releases/latest/download/sensenova-u1-macos-arm64.tar.gz`，只有某个 release 恰好带了
+  这个文件名的资产，这条链接才成立。
+* **必须带 `--repo hrygo/SenseNovaU1-Service`**：本地还配着 `upstream`（本 fork 的上游），
+  `gh` 默认会认成上游仓库——轻则报"tag 没推到 xocialize/sensenova-u1-swift"，重则把
+  release 发到错误的地方。
+* **按用户的方式验一遍**：匿名下载稳定名那份，和 `.sha256` 资产比对，不要只看上传成功：
+
+```bash
+base=https://github.com/hrygo/SenseNovaU1-Service/releases/latest/download
+curl -fsSLO "$base/sensenova-u1-macos-arm64.tar.gz{,.sha256}"
+shasum -a 256 -c sensenova-u1-macos-arm64.tar.gz.sha256
+```
+
 ## 交付前清单
 
 - [ ] `make release-verify` 通过（它会校验 sha256、给解压出来的整棵树打上隔离属性、
