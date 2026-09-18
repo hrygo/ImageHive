@@ -22,7 +22,17 @@ swift build -c release --product sensenova-mcp
 mkdir -p "$bin"
 install -m 0755 .build/release/sensenova-served "$bin/sensenova-served"
 install -m 0755 .build/release/sensenova-mcp "$bin/sensenova-mcp"
-echo "installed: $bin/sensenova-served, $bin/sensenova-mcp"
+
+# MLX resolves its Metal library from a resource bundle that must sit next to
+# the executable; installing the binary alone gives "Failed to load the default
+# metallib" and every generation dies.
+for bundle in .build/release/*.bundle; do
+  [ -e "$bundle" ] || continue
+  rm -rf "$bin/$(basename "$bundle")"
+  cp -R "$bundle" "$bin/"
+done
+
+echo "installed: $bin/sensenova-served, $bin/sensenova-mcp, $(ls -d "$bin"/*.bundle | wc -l | tr -d ' ') resource bundle(s)"
 
 if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
   launchctl kickstart -k "gui/$(id -u)/$label"
