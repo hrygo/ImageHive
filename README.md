@@ -16,6 +16,25 @@ default, ModelScope first — no proxy needed in China), builds, installs a
 background service, wires the MCP clients it finds, and runs a smoke test.
 Then just ask your agent for a picture.
 
+## Where it installs
+
+Everything is per-user; nothing needs `sudo` and nothing is written into a
+Homebrew prefix.
+
+| | |
+|---|---|
+| Command | `~/.local/bin/sensenova-u1` |
+| Binaries, MLX bundles, CLI internals | `~/.local/share/sensenova-u1/` |
+| Weights (~11–33 GB) | `~/Library/Application Support/SenseNovaU1/models/` |
+| Config, socket, service definition | `~/Library/Application Support/SenseNovaU1/` |
+| Log | `~/Library/Logs/SenseNovaU1/served.log` |
+| Generated images | `~/Pictures/SenseNovaU1/` |
+
+`sensenova-u1 paths` prints them; `--home`, `--models`, `--out`, `--prefix` and
+`--label` (or the matching `SENSENOVA_*` variables) move any of them. The
+reasoning, and the exact rules each choice follows, is in
+[Docs/LAYOUT.md](Docs/LAYOUT.md).
+
 ## What your agent gets
 
 | Tool | What it does |
@@ -89,7 +108,7 @@ sensenova-u1 restart     # restart the daemon (the weights stay on disk)
 
 The daemon starts on demand: the first request after an idle period loads the
 weights (~5 s) and they are released again after 10 minutes of idleness
-(`ttl_seconds` in `~/Models/SenseNova-U1.5/config.json`). Nothing keeps 35 GB
+(`ttl_seconds` in `~/Library/Application Support/SenseNovaU1/config.json`). Nothing keeps 35 GB
 pinned down unless you are actively using it.
 
 ## One model, many agents
@@ -115,10 +134,11 @@ tests/smoke.sh           # three concurrent clients, asserts one load
 
 Two files, both optional and both plain JSON/shell:
 
-* `~/Models/SenseNova-U1.5/config.json` — `ttl_seconds`, `min_warm_seconds`,
-  `fast_artifact`, `quality_artifact`.
-* `~/Models/SenseNova-U1.5/service.conf` — install layout (where the binaries,
-  the launchd label and the socket live). Written by `install.sh`;
+* `~/Library/Application Support/SenseNovaU1/config.json` — `ttl_seconds`,
+  `min_warm_seconds`, `fast_artifact`, `quality_artifact` (names are relative to
+  the models root unless absolute).
+* `~/Library/Application Support/SenseNovaU1/service.conf` — install layout
+  (home, models, prefix, launchd label, socket). Written by `install.sh`;
   `sensenova-u1 config set SENSENOVA_LABEL=...` edits it.
 
 Environment variables (`SENSENOVA_HOME`, `SENSENOVA_TTL_SECONDS`, `SENSENOVA_SOCKET`,
@@ -159,6 +179,11 @@ The service is two small Swift executables (`Sources/sensenova-served`,
 Build, protocol and design notes live in [LOCAL-SERVICE.md](LOCAL-SERVICE.md);
 the upstream port's own README (performance tables, CLI, quantization doctrine) is
 preserved as [UPSTREAM-README.md](UPSTREAM-README.md).
+
+Before changing anything, read [AGENTS.md](AGENTS.md): it lists the invariants
+the service depends on, how to test an installer without touching your real
+install, and which document to update for which change. Install locations and
+their rationale: [Docs/LAYOUT.md](Docs/LAYOUT.md).
 
 ## Credits and license
 

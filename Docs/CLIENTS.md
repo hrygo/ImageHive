@@ -4,10 +4,14 @@ Every client points at the same binary and the same two environment variables,
 so one install serves all of them:
 
 ```
-command: <home>/bin/sensenova-mcp
-env:     SENSENOVA_HOME=<home>
-         SENSENOVA_SERVED_BIN=<home>/bin/sensenova-served
+command: ~/.local/share/sensenova-u1/bin/sensenova-mcp
+env:     SENSENOVA_HOME=<app home>                 # ~/Library/Application Support/SenseNovaU1
+         SENSENOVA_SERVED_BIN=<bin dir>/sensenova-served
+         # only when they differ from what the app home implies:
+         # SENSENOVA_MODELS=<models root>   SENSENOVA_OUT=<images directory>
 ```
+
+`sensenova-u1 clients snippet` prints this block with this machine's real paths.
 
 `install.sh` wires the clients it detects. Later:
 

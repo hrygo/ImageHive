@@ -15,7 +15,7 @@ first generation.**
 MLX keeps its Metal library in `mlx-swift_Cmlx.bundle`, which has to sit next to
 the executable. Installing only the binary breaks it. Re-run `./install.sh`
 (it copies every `*.bundle`), then check that
-`ls ~/Models/SenseNova-U1.5/bin/*.bundle` lists at least one bundle.
+`ls ~/.local/share/sensenova-u1/bin/*.bundle` lists at least one bundle.
 
 **The build stops early with a Metal or `metal` compiler error.**
 Xcode 27 ships the Metal toolchain as a separate component:
@@ -36,7 +36,8 @@ MCP servers are started per session — restart the client, then
 
 **The first image after a while takes 5–10 s longer.**
 That is the model load, not a hang. It is released again after `ttl_seconds`
-idle (default 600 s). Raise `ttl_seconds` in `~/Models/SenseNova-U1.5/config.json`
+idle (default 600 s). Raise `ttl_seconds` in
+`~/Library/Application Support/SenseNovaU1/config.json`
 if you would rather stay warm, or call `sensenova-u1 unload` when you are done.
 
 **Two clients, one at a time.**

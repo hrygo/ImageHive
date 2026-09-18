@@ -18,8 +18,10 @@
 | `Sources/sensenova-mcp/` | stdio MCP 前端：无状态、不加载权重，把工具调用转成 socket 请求；连不上时按需拉起守护进程 |
 | `install.sh` / `uninstall.sh` | 安装与卸载：preflight、制品下载、构建、安装、LaunchAgent、客户端接线、冒烟 |
 | `cli/sensenova-u1` | 管理命令：`status`/`doctor`/`models`/`clients`/`generate`/`config` 等 |
+| `Docs/LAYOUT.md` | 安装位置与依据（app data / 可执行文件 / 权重 / 出图各自的家） |
+| `AGENTS.md` | 改这个仓库的 agent 指导：硬约束、验证清单、文档归属 |
 | `Package.swift` | 相对上游的两处改动：新增上述两个 executable target |
-| `scripts/deploy.sh` | 兼容入口：等价于 `install.sh --model none --clients none`（构建 + 安装到 `$SENSENOVA_HOME/bin` + 重启） |
+| `scripts/deploy.sh` | 兼容入口：等价于 `install.sh --model none --clients none`（构建 + 安装到 `~/.local/share/sensenova-u1/bin` + 重启） |
 
 ## 构建与运行
 
@@ -33,20 +35,23 @@ swift build -c release --product sensenova-mcp
 # 只重建并重装本机已装的产物（不下载模型、不接线）
 ./scripts/deploy.sh
 
-# 守护进程（前台运行；正常由 launchd 或 MCP 前端拉起）
-SENSENOVA_HOME="$HOME/Models/SenseNova-U1.5" "$HOME/Models/SenseNova-U1.5/bin/sensenova-served"
+# 守护进程（前台运行；正常由 launchd 或 MCP 前端拉起）。两个可执行文件装在
+# ~/.local/share/sensenova-u1/bin，应用数据/权重在 ~/Library/Application Support/SenseNovaU1。
+"$HOME/.local/share/sensenova-u1/bin/sensenova-served"
 
 # 前端：stdio 上跑 MCP，日志走 stderr
-"$HOME/Models/SenseNova-U1.5/bin/sensenova-mcp"
+"$HOME/.local/share/sensenova-u1/bin/sensenova-mcp"
 ```
 
 环境变量（都有默认值，见两个 `main.swift` 顶部）：
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `SENSENOVA_HOME` | `~/Models/SenseNova-U1.5` | 权重、制品与出图目录 |
-| `SENSENOVA_SOCKET` | `~/Library/Application Support/SenseNovaU1/served.sock` | 守护进程监听路径，同时是单实例互斥锁 |
-| `SENSENOVA_SERVED_BIN` | `$SENSENOVA_HOME/bin/sensenova-served` | 前端自拉守护进程时用的可执行文件 |
+| `SENSENOVA_HOME` | `~/Library/Application Support/SenseNovaU1` | 应用数据：`config.json`、`service.conf`、socket |
+| `SENSENOVA_MODELS` | `$SENSENOVA_HOME/models` | 权重与制品目录（`config.json` 里的相对路径以此为准） |
+| `SENSENOVA_OUT` | `~/Pictures/SenseNovaU1` | 出图目录 |
+| `SENSENOVA_SOCKET` | `$SENSENOVA_HOME/served.sock` | 守护进程监听路径，同时是单实例互斥锁 |
+| `SENSENOVA_SERVED_BIN` | `~/.local/share/sensenova-u1/bin/sensenova-served` | 前端自拉守护进程时用的可执行文件 |
 | `SENSENOVA_TTL_SECONDS` | `600` | 空闲多久卸载权重 |
 | `SENSENOVA_MIN_WARM_SECONDS` | `60` | 出图后最短保温时间 |
 
@@ -76,4 +81,6 @@ git rebase origin/main local/main
 - 没有接上游 `MLXSenseNovaU1` 的 MLXEngine 契约包：本服务只需要"一份权重 + 串行出图 +
   空闲卸载"，直接调 `SenseNovaU1` 核心少一层版本耦合；需要引擎的内存预算/压力驱逐时再接。
 - 没有实现 MCP tasks 扩展：当前是同步阻塞 + 服务端串行队列，客户端一直等到出图完成。
-- 权重目录与构建目录分离：权重在 `~/Models/SenseNova-U1.5`（35GB × 2 档），本仓库只放代码。
+- 权重目录与构建目录分离：权重在 `~/Library/Application Support/SenseNovaU1/models`（本机 33GB × 2 档），
+  可执行文件在 `~/.local/share/sensenova-u1`，出图在 `~/Pictures/SenseNovaU1`；本仓库只放代码。
+  选择依据与迁移方式见 `Docs/LAYOUT.md`。

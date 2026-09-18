@@ -48,7 +48,7 @@ first. `sensenova-u1 status` shows `resident_tier`, `last_peak_mb` and
 Point the daemon at any directory with the same shape:
 
 ```json
-// ~/Models/SenseNova-U1.5/config.json
+// ~/Library/Application Support/SenseNovaU1/config.json
 {
   "ttl_seconds": 600,
   "min_warm_seconds": 60,
@@ -57,9 +57,12 @@ Point the daemon at any directory with the same shape:
 }
 ```
 
-Relative paths resolve against `SENSENOVA_HOME`. This is how a machine that built
-its own artifacts (for example a bf16 8-step merge produced with the upstream
-`sensenova-cli convert`) can use them instead of downloading a preset.
+Relative paths resolve against the models root
+(`~/Library/Application Support/SenseNovaU1/models` by default —
+`sensenova-u1 paths` prints it, `SENSENOVA_MODELS` or `--models` moves it). This
+is how a machine that built its own artifacts (for example a bf16 8-step merge
+produced with the upstream `sensenova-cli convert`) can use them instead of
+downloading a preset.
 
 ## Building your own artifact (advanced)
 
