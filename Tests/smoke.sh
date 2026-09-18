@@ -114,15 +114,31 @@ echo "   tools: $tools"
 case "$versions" in *2026-07-28*) echo "   server/discover: $versions";; *) fail "server/discover did not advertise 2026-07-28";; esac
 
 echo "== daemon lifecycle"
+# A config.json that exists but cannot be parsed used to be indistinguishable from no
+# file at all: every setting in it was dropped and the daemon served the built-in
+# defaults in silence. It must say so, in its log and in the status a client reads.
+printf '{"ttl_seconds": "600",\n' > "$SENSENOVA_HOME/config.json"
 "$served" >/dev/null 2>"$work/daemon.log" &
 daemon_pid=$!
 for _ in $(seq 1 60); do [ -S "$SENSENOVA_SOCKET" ] && break; sleep 0.25; done
 [ -S "$SENSENOVA_SOCKET" ] || fail "daemon did not bind $SENSENOVA_SOCKET (see $work/daemon.log)"
+for _ in $(seq 1 40); do
+  grep -q "not valid JSON" "$work/daemon.log" 2>/dev/null && break
+  sleep 0.25
+done
+grep -q "not valid JSON" "$work/daemon.log" \
+  || fail "a malformed config.json produced no diagnostic: $(cat "$work/daemon.log")"
+echo "   $(grep -m1 'not valid JSON' "$work/daemon.log" | sed 's/^sensenova-served: //')"
+rm -f "$SENSENOVA_HOME/config.json"
 
 second="$(SENSENOVA_SOCKET="$SENSENOVA_SOCKET" "$served" 2>&1 || true)"
 case "$second" in *"another instance is live"*) echo "   second instance refused" ;; *) fail "second instance was not refused: $second";; esac
 
 status="$("$mcp" --status)"
+case "$status" in
+  *"config_warning="*"not valid JSON"*) echo "   status carries the same warning" ;;
+  *) fail "the status a client reads does not mention the dropped settings: $status" ;;
+esac
 case "$status" in *resident_tier=cold*) echo "   $(echo "$status" | tr '\n' ' ')" ;; *) fail "expected a cold start, got: $status";; esac
 
 if [ "$QUICK" = "1" ] || [ -z "$present_tier" ]; then

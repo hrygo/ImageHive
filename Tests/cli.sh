@@ -2,11 +2,13 @@
 # End-to-end test for the command-line front end.
 #
 #   Tests/cli.sh            # everything (needs one installed artifact)
-#   Tests/cli.sh --quick    # argument handling and help only, no model
+#   Tests/cli.sh --quick    # argument handling, protocol and socket lifecycle only
 #
 # Runs the repo's own CLI against a private daemon on a private socket with its own
 # HOME, PREFIX and output directory, so the installed service is never touched. The
-# generation assertions are skipped when this host has no artifact to run.
+# generation assertions are skipped when this host has no artifact to run; everything
+# else (the argument contract, the socket's life and death) runs either way, which is
+# what `make test-quick` and CI depend on.
 
 set -euo pipefail
 
@@ -91,14 +93,20 @@ esac
 "${cli[@]}" generate --prompt x --width 1000 --height 512 >/dev/null 2>&1 \
   && fail "a bad width exited 0"
 
+# Everything below runs on a cold daemon — the protocol, the argument contract, the
+# socket's life and death — and only the three generation blocks need weights. The
+# quick run therefore covers the daemon-side checks too (CI runs only --quick).
+have_model=1
 if [ "$QUICK" = "1" ] || [ ! -f "$SENSENOVA_QUALITY_ARTIFACT/config.json" ]; then
-  [ "$QUICK" = "1" ] && echo "== quick mode: skipping everything that needs a model" \
-    || echo "== no artifact on this host: skipping everything that needs a model"
-  echo "PASS (cli, no model)"
-  exit 0
+  have_model=0
 fi
 
 echo "== the service the CLI talks to"
+# A config.json that exists but cannot be parsed. The daemon starts anyway and serves
+# the built-in defaults, so nothing else in `doctor` looks wrong; before this check
+# existed a truncated file, a type-wrong `ttl_seconds` and a 000-mode file all ran
+# the defaults with no trace anywhere. (smoke.sh asserts the daemon's own side.)
+printf '{"ttl_seconds": "600",\n' > "$SENSENOVA_HOME/config.json"
 "$served" >/dev/null 2>"$work/daemon.log" &
 daemon_pid=$!
 # Detach from this shell's job table: bash otherwise prints its own
@@ -106,6 +114,14 @@ daemon_pid=$!
 disown "$daemon_pid" 2>/dev/null || true
 for _ in $(seq 1 60); do [ -S "$SENSENOVA_SOCKET" ] && break; sleep 0.25; done
 [ -S "$SENSENOVA_SOCKET" ] || fail "the daemon did not bind $SENSENOVA_SOCKET"
+
+echo "== doctor reports a config.json whose settings are being ignored"
+doctor_text="$("${cli[@]}" doctor 2>&1 || true)"
+case "$doctor_text" in
+  *"config.json is not valid JSON"*) ok "flagged, where it used to print a ✓" ;;
+  *) fail "doctor did not flag the malformed config.json: $(printf '%s\n' "$doctor_text" | grep config.json)" ;;
+esac
+rm -f "$SENSENOVA_HOME/config.json"
 
 echo "== what the service accepts"
 options_text="$("${cli[@]}" options)"
@@ -115,8 +131,11 @@ case "$options_text" in
 esac
 ok "$(printf '%s\n' "$options_text" | head -1)"
 
+if [ "$have_model" = "1" ]; then
 echo "== a fixed seed, a sidecar, and structured output"
-args=(generate --prompt "cli probe" --seed 4242 --width 256 --height 256 --steps 4)
+# A seed of 1 is also the sharpest test of the protocol's type handling: it is the
+# number that used to be read as a boolean (see jsonIsBoolean in the daemon).
+args=(generate --prompt "cli probe" --seed 1 --width 256 --height 256 --steps 4)
 first="$("${cli[@]}" "${args[@]}" --json)"
 second="$("${cli[@]}" "${args[@]}" --json)"
 python3 - "$first" "$second" <<'PY' || fail "the CLI's JSON output did not hold up (see above)"
@@ -124,7 +143,7 @@ import hashlib, json, os, sys
 
 a, b = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 assert a.get("ok") is True, a
-assert a.get("seed") == 4242 and a.get("seed_source") == "explicit", a
+assert a.get("seed") == 1 and a.get("seed_source") == "explicit", a
 assert a.get("metadata", "").endswith(".png.json"), a.get("metadata")
 record = json.load(open(a["metadata"]))
 assert record["prompt_sha256"] == hashlib.sha256(record["prompt"].encode()).hexdigest()
@@ -153,11 +172,64 @@ files = sorted(os.listdir(sys.argv[2]))
 assert len(files) == 4, files          # two PNGs, two sidecars
 print("   seeds %s, files %s" % ([i["seed"] for i in items], len(files)))
 PY
+else
+  echo "== no artifact on this host (or --quick): skipping the generation assertions"
+fi
 
 echo "== a request the daemon refuses does not take the service down"
 "${cli[@]}" generate --prompt x --width 1000 --height 512 >/dev/null 2>&1 || true
 "${cli[@]}" status >/dev/null || fail "the service stopped answering after a refused request"
 ok "still answering"
+
+echo "== arguments with the wrong JSON type are refused, not silently defaulted"
+# Measured before this check existed: `"width":"512"` rendered 1024x1024,
+# `"steps":"4"` ran 50 steps and `"seed":"126"` produced a *random* seed — a caller
+# comparing two runs would never learn that its settings had been dropped.
+probe() { python3 "$REPO_DIR/Tests/socket_probe.py" "$SENSENOVA_SOCKET" "$1"; }
+# `status` indents the key=value block, so match the field anywhere in the line.
+loads() { "${cli[@]}" status | grep -o 'loads_total=[0-9]*' | cut -d= -f2; }
+loads_before="$(loads)"
+for bad in '{"cmd":"generate","prompt":"x","width":"512"}' \
+           '{"cmd":"generate","prompt":"x","steps":"4"}' \
+           '{"cmd":"generate","prompt":"x","seed":"126"}' \
+           '{"cmd":"generate","prompt":"x","seed":true}' \
+           '{"cmd":"generate","prompt":"x","tier":3}' \
+           '{"cmd":"edit","prompt":"x","images":"a.png"}'; do
+  reply="$(probe "$bad")"
+  case "$reply" in
+    *'"ok": false'*|*'"ok":false'*) ;;
+    *) fail "a wrongly typed argument was accepted: $bad -> $reply" ;;
+  esac
+  case "$reply" in
+    *"must be a number"*|*"must be a string"*|*"must be an array"*|*"is not a tier"*) ;;
+    *) fail "the refusal does not say what was wrong: $bad -> $reply" ;;
+  esac
+done
+loads_after="$(loads)"
+[ "$loads_before" = "$loads_after" ] || fail "a refused argument still loaded the model"
+ok "six bad requests refused, and the model stayed unloaded (loads_total=$loads_before)"
+
+echo "== a bare newline gets an answer instead of silence"
+empty_reply="$(probe '')"
+case "$empty_reply" in *"empty request"*) ok "$empty_reply" ;;
+  *) fail "an empty line got no usable reply: $empty_reply" ;;
+esac
+
+echo "== a mistyped image path is an error, not an answer about nothing"
+missing_reply="$(probe '{"cmd":"vqa","prompt":"what is this","images":["/nope.png"]}')"
+case "$missing_reply" in *"no such image"*) ok "$missing_reply" ;;
+  *) fail "a missing image did not produce a clear error: $missing_reply" ;;
+esac
+
+echo "== a request with no trailing newline is logged, not silently dropped"
+python3 "$REPO_DIR/Tests/socket_probe.py" --partial "$SENSENOVA_SOCKET" '{"cmd":"status"}' >/dev/null
+for _ in $(seq 1 20); do
+  grep -q "no trailing newline" "$work/daemon.log" 2>/dev/null && break
+  sleep 0.25
+done
+grep -q "no trailing newline" "$work/daemon.log" \
+  || fail "a client that forgot the newline left no trace in the log"
+ok "diagnosed in the daemon log"
 
 echo "== status names the process and the build that answered"
 serving="$("${cli[@]}" status)"
@@ -193,6 +265,9 @@ for _ in $(seq 1 20); do
   sleep 0.25
 done
 [ -z "$(socket_owners)" ] || fail "the socket is still owned after stop: $(socket_owners) (pid $daemon_pid)"
-ok "the socket was handed back"
+# The daemon unlinks its socket on SIGTERM. Without that, the file outlives the
+# process and every "is it up?" check that looks at the file alone says yes.
+[ -S "$SENSENOVA_SOCKET" ] && fail "the stopped daemon left $SENSENOVA_SOCKET behind"
+ok "the socket was handed back and removed"
 
-echo "PASS (cli)"
+if [ "$have_model" = "1" ]; then echo "PASS (cli)"; else echo "PASS (cli, protocol only)"; fi
