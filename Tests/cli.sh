@@ -31,16 +31,31 @@ trap cleanup EXIT
 # 2026-09-18: `(closed, no reply)` from the probe, nothing else).
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
-  if [ -f "$work/daemon.log" ]; then
-    printf -- '--- daemon log (tail) ---\n' >&2
-    tail -20 "$work/daemon.log" >&2
-  fi
+  # `printf -- '--- …'` is not optional here: bash's builtin reads a format that
+  # starts with `-` as an option and dies with status 2, which on the CI runner
+  # killed this function before it printed anything (measured 2026-09-18:
+  # `Tests/cli.sh: line 42: printf: --: invalid option` was the last line of the
+  # step, and "the daemon is gone" never appeared).
   if [ -n "$daemon_pid" ]; then
     if kill -0 "$daemon_pid" 2>/dev/null; then
-      printf '--- daemon pid %s is still alive ---\n' "$daemon_pid" >&2
+      printf -- '--- daemon pid %s is still alive ---\n' "$daemon_pid" >&2
     else
-      printf '--- daemon pid %s is gone ---\n' "$daemon_pid" >&2
+      # 128+signal is the only way to tell a crash from an ordinary exit.
+      wait "$daemon_pid" 2>/dev/null
+      printf -- '--- daemon pid %s is gone (wait status %s) ---\n' \
+        "$daemon_pid" "$?" >&2
     fi
+    # The SIGTERM/SIGINT handler unlinks the socket on the way out, so a socket
+    # that survives its process is evidence the exit did not go through it.
+    if [ -S "$IMAGEHIVE_SOCKET" ]; then
+      printf -- '--- socket file still present, nobody listening ---\n' >&2
+    else
+      printf -- '--- socket file gone ---\n' >&2
+    fi
+  fi
+  if [ -f "$work/daemon.log" ]; then
+    printf -- '--- daemon log (tail) ---\n' >&2
+    tail -40 "$work/daemon.log" >&2
   fi
   exit 1
 }

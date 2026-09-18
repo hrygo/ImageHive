@@ -70,6 +70,14 @@ make release-verify  # 打出 tar 包并装进沙箱 HOME 验证
    `1000x1000`）。
    `cli/imagehive` 在本地重复同一套检查，让笔误不必往返回一趟。两处都要加规则（消息里都要
    给出合法的替代值），并在 `Tests/cli.sh` 与 `Tests/smoke.sh` 里断言它。
+   **"加载之前"也包括不碰 MLX。** MLX 在本进程里的第一次调用会顺带建 Metal 设备，而没有
+   Metal 设备的机器上那一次调用不可生还：mlx-c 的默认错误处理器是
+   `printf("MLX error: …"); exit(-1)`——理由打进 stdout、退出码 255，stderr 里一个字都
+   没有（实测 2026-09-18：CI runner 上 `system_profiler SPDisplaysDataType` 无输出，一条
+   被拒绝的 `"width": "512"` 请求就这样带走整个守护进程，测试只看到 `(closed, no reply)`；
+   空转 3 秒、连打 5 条 `status` 都活着）。所以任何"加载之前"的路径——`handle` 的收尾统计、
+   `release()` 的 `clearCache`——都必须先问 `mlxTouched`。守护进程把 stdout 并进 stderr
+   也是为这条服务的：库的死因不能只留在会被 `/dev/null` 吃掉的那个流里。
 8. **一个结果要在三处描述。** 调用方能从 MCP 回复或 `--json` 读到的任何字段，也要写进图片
    旁边的 sidecar；任何描述"这份服务接受什么"的内容，也要进 `model_options`。只加在其中
    一处，就是那类让"这张图是哪条提示词画的？"变得无法回答的漂移。

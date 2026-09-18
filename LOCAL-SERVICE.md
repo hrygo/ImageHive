@@ -95,6 +95,15 @@ git rebase upstream/main main
   进度由调用方轮询 `current`，不往 socket 上发消息——保持一行请求一行响应。
 - **校验前移**：尺寸/步数/seed 在任何权重加载之前校验。模型渲染不了的尺寸不是失败请求，
   而是不可捕获的 `[reshape]` fatal（实测 1000x1000 会带走整个共用服务）。
+- **MLX 的第一次调用有副作用，所以"被拒的请求"不能碰它**：本进程里第一次调用 MLX 会顺带
+  建 Metal 设备，而没有 Metal 设备的机器上那一次调用活不过去——mlx-c 的默认错误处理器是
+  `printf("MLX error: …"); exit(-1)`：理由打在 stdout、退出码 255，stderr（也就是日志）
+  里一个字都没有。实测 2026-09-18（CI runner：7 GiB，`system_profiler SPDisplaysDataType`
+  无输出）空转 3 秒、连打 5 条 `status` 都活着，一条**本该被拒绝**的 `generate`
+  （`"width": "512"`）就带走了整个守护进程，调用方只看到 `(closed, no reply)`。因此
+  `peakMemory`/`clearCache` 只在进程确实做过模型工作后调用（`mlxTouched`），守护进程的
+  stdout 也并进 stderr——库的死因不该只留在会被 `/dev/null` 吃掉的那个流里。没有 Metal
+  设备的机器本来就跑不了模型，要守住的是"被拒的请求不触发它"。
 - **参数是强类型的，只有"缺省"才等于"用默认值"**：类型不对的键一律报错并复述收到的值。
   旧行为实测会静默替换：`"width":"512"` 按 1024x1024 出图、`"steps":"4"` 跑 50 步、
   `"seed":"126"` 变成**随机** seed——做对比评测的人永远不会知道设置被丢掉了。实现时必须

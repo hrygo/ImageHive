@@ -17,6 +17,22 @@ the executable. Installing only the binary breaks it. Re-run `./install.sh`
 (it copies every `*.bundle`), then check that
 `ls ~/.local/share/imagehive/bin/*.bundle` lists at least one bundle.
 
+**The daemon vanishes on the first tool call and the log stops at the request.**
+There is probably no Metal device on this host:
+
+```bash
+system_profiler SPDisplaysDataType    # no output at all => no GPU
+```
+
+MLX builds its Metal device on the first call, and without a device that call
+prints `MLX error: …` and then quits: `mlx-c`'s default error handler ends in
+`exit(-1)`, so the daemon leaves with status 255. `imagehive logs` has the reason
+(`MLX error: Failed to load device`) — the daemon folds its stdout into the log at
+startup, which is where that line used to get lost. On a machine with no GPU the
+model cannot run at all, and the first real generation is where it stops. Requests
+refused before any weights are loaded no longer reach MLX (fixed 2026-09-18), so
+`status`, `options` and a mistyped argument are answered normally even there.
+
 **The build stops early with a Metal or `metal` compiler error.**
 Xcode 27 ships the Metal toolchain as a separate component:
 

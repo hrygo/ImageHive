@@ -60,6 +60,17 @@ if CommandLine.arguments.dropFirst().contains(where: { $0 == "--version" || $0 =
     exit(0)
 }
 
+// Fold stdout into the log. The daemon's own records go to stderr; stdout is left to
+// the libraries under it, and mlx-c's default error handler is
+// `printf("MLX error: %s\n", …); exit(-1)` — it names the reason for a hard exit and
+// then quits. Callers that keep both descriptors on one file (the launchd job and the
+// MCP front end) already collect it, but the ones that capture only stderr — every
+// test script, `verify_release.sh` — lose it, which is how a daemon that exited 255
+// mid-request came back as `(closed, no reply)` with an empty log (measured
+// 2026-09-18, the red CI run this line was written for). `--version` above still
+// answers on the real stdout, which a caller may be reading.
+dup2(STDERR_FILENO, STDOUT_FILENO)
+
 /// The knobs a user is allowed to turn, from $IMAGEHIVE_HOME/config.json:
 ///
 ///     {
@@ -663,6 +674,19 @@ actor Core {
     private var inflight = 0
     private var waiting = 0
     private var lastPeakMB = 0
+    /// Whether this process has initialized MLX (Metal) yet.
+    ///
+    /// MLX builds its Metal device on the *first* call, wherever that call comes
+    /// from, and on a machine with no Metal device that first call cannot be
+    /// survived: mlx-c's default error handler prints "MLX error: …" to stdout and
+    /// then `exit(-1)`. So the two MLX calls this actor makes outside the model code
+    /// (the peak-memory counter and `release()`'s `clearCache`) are gated on it: a
+    /// request refused before `ensureLoaded` must leave the GPU stack untouched on a
+    /// machine that cannot run the model at all (measured 2026-09-18 on a CI runner:
+    /// no Metal device, and the first request to reach that counter — a `generate`
+    /// refused for `"width": "512"` — exited the daemon with 255 instead of being
+    /// answered).
+    private var mlxTouched = false
     /// In-flight load, so concurrent callers await the same materialization
     /// instead of each starting their own (the actor is re-entrant at awaits).
     private var pendingLoad: (tier: String, task: Task<Resident, Error>)?
@@ -710,7 +734,10 @@ actor Core {
         tokenizer = nil
         residentTier = nil
         loadedAt = nil
-        MLX.Memory.clearCache()
+        // Same gate as the counters: `imagehive unload` on a cold daemon reaches this
+        // line, and clearing a cache that cannot have anything in it is not worth
+        // initializing Metal for.
+        if mlxTouched { MLX.Memory.clearCache() }
         publish()
     }
 
@@ -760,6 +787,11 @@ actor Core {
                 """])
         }
         let t0 = Date()
+        // Past the guards: this is where the process starts touching MLX, so record
+        // it before the load rather than after — a load that fails halfway still
+        // leaves the stack initialized (and would otherwise die a second time in the
+        // counters below).
+        mlxTouched = true
         let task = Task.detached(priority: .userInitiated) { () throws -> Resident in
             let m = try WeightLoading.loadArtifact(from: dir)
             let t = try await SenseNovaTokenizer.load(from: dir)
@@ -818,7 +850,9 @@ actor Core {
             waiting = max(0, waiting - 1)
             inflight = max(0, inflight - 1)
             lastUseAt = Date()
-            lastPeakMB = MLX.Memory.peakMemory / (1 << 20)
+            // `MLX.Memory.peakMemory` is the one MLX call a request that never loaded
+            // anything could otherwise reach; see `mlxTouched`.
+            if mlxTouched { lastPeakMB = MLX.Memory.peakMemory / (1 << 20) }
             publish()
         }
         do {

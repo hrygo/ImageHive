@@ -27,6 +27,31 @@
 GitHub Release 上。Release 页面承载资产与简短公告，本文件是长期记录。具体命令见
 [Docs/DISTRIBUTING.zh-CN.md](Docs/DISTRIBUTING.zh-CN.md)。
 
+## [Unreleased]
+
+### 修复
+
+* **被拒的请求不再碰 MLX。** `handle` 的收尾统计会读 `MLX.Memory.peakMemory`，而 MLX 在
+  进程里的第一次调用会顺带建 Metal 设备——没有 Metal 设备的机器上那一次调用活不过去
+  （实测 2026-09-18：CI runner，7 GiB，`system_profiler SPDisplaysDataType` 无输出）。
+  于是一条**本该被拒绝**的请求（`"width": "512"`）会让守护进程带着 255 退出，调用方收到
+  `(closed, no reply)`；同一条 `status` 请求、乃至空转 3 秒都毫无问题，所以这不是"机器
+  不稳"，而是"拒绝的路径不该触发模型栈"。现在 `peakMemory`/`clearCache` 只在进程确实做过
+  模型工作之后调用；`imagehive unload` 在冷启动时同样不再初始化 Metal。
+* **守护进程的 stdout 并入日志。** 上面那条死因是 mlx-c 默认错误处理器
+  `printf("MLX error: …"); exit(-1)` 打的，走 stdout；测试脚本与 `verify_release.sh` 只收
+  stderr，于是"进程中途消失"只剩一个空日志。launchd job 与 MCP 前端本来就让两个流去同一个
+  文件，这一改是让"只收 stderr"的调用方也不再丢线索。
+
+### 文档与测试
+
+* `Tests/cli.sh` 的 `fail()` 现在能说完话：两条 `printf '--- …'` 少了 `--`，bash 3.2 把
+  以 `-` 开头的格式当选项、函数带着状态 2 退出，"守护进程还在不在"从来没打印过（CI 日志
+  末行就是那条 `printf: --: invalid option`）。现在还会报 `wait` 状态（崩溃是 128+signal）
+  与 socket 文件是否还在。
+* 失败方式写进 [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md)，实测与取舍写进
+  [LOCAL-SERVICE.md](LOCAL-SERVICE.md)，约束写进 [AGENTS.md](AGENTS.md)。
+
 ## [0.6.0] - 2026-09-18
 
 **项目更名为 imagehive。** 旧名 `sensenova-u1` 把上游的模型名当成了自己的名字，读起来像官方
