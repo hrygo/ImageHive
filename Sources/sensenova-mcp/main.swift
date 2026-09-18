@@ -15,7 +15,27 @@
 
 import Foundation
 
-let serviceVersion = "0.1.0"
+/// The project version — `cli/lib/common.sh`'s `SV_VERSION`, written into
+/// `service.conf` by install.sh. Reported here and in `serverInfo` so a client log
+/// says which build answered; it used to print `0.1.0`, a number that matched no
+/// release. Same rule as the daemon; `unknown` when nothing says otherwise.
+func confValue(_ key: String, in path: String) -> String? {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    for line in text.split(separator: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("\(key)=") else { continue }
+        let raw = trimmed.dropFirst(key.count + 1)
+        return raw.trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+    }
+    return nil
+}
+
+let earlyHome = ProcessInfo.processInfo.environment["HOME"]
+    ?? FileManager.default.homeDirectoryForCurrentUser.path
+let serviceVersion = ProcessInfo.processInfo.environment["SENSENOVA_VERSION"]
+    ?? confValue("SENSENOVA_VERSION", in: ProcessInfo.processInfo.environment["SENSENOVA_CONF"]
+        ?? "\(ProcessInfo.processInfo.environment["SENSENOVA_HOME"] ?? "\(earlyHome)/Library/Application Support/SenseNovaU1")/service.conf")
+    ?? "unknown"
 let arguments = Array(CommandLine.arguments.dropFirst())
 if arguments.contains("--version") || arguments.contains("-v") {
     print("sensenova-mcp \(serviceVersion)")
@@ -288,6 +308,14 @@ func runManagementSwitch(_ flag: String) {
         print("ttl_seconds=\(Int(ttl))")
         print("last_peak_mb=\(peak)")
         if let when = status["last_request_at"] as? String { print("last_request_at=\(when)") }
+        // Live progress, so `sensenova-u1 status` is useful while it runs rather than
+        // just saying inflight=1.
+        if let current = status["current"] as? [String: Any] {
+            print("current=\(current["tool"] as? String ?? "job") "
+                + "step \(intValue(current["step"]) ?? 0)/\(intValue(current["total"]) ?? 0) "
+                + "\(intValue(current["percent"]) ?? 0)% "
+                + "elapsed \(doubleValue(current["elapsed_seconds"]) ?? 0)s")
+        }
     case "--unload":
         let response = (try? daemon.call(["cmd": "unload"])) ?? [:]
         guard (response["ok"] as? Bool) == true else {
@@ -335,6 +363,10 @@ let toolCatalogue: [[String: Any]] = [
           "steps": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Diffusion steps; omit for the tier default."},
           "cfg": {"type": "number", "description": "Classifier-free guidance scale; omit for the tier default."},
           "seed": {"type": "integer", "description": "Fixes generation for reproducibility; omit for random."},
+          "negative": {
+            "type": "string",
+            "description": "What the image should avoid, for example: blurry, watermark, extra fingers. This is the unconditional branch of guidance, so it only bites when guidance is on (the quality recipe, cfg > 1); with cfg 1.0 it is ignored. The reply and the sidecar record it either way."
+          },
           "inline_thumbnail": {
             "type": "boolean",
             "default": false,
@@ -351,7 +383,7 @@ let toolCatalogue: [[String: Any]] = [
     {
       "name": "edit_image",
       "title": "Edit an image",
-      "description": "Edit or restyle existing local images with a natural-language instruction, using the same SenseNova-U1.5 model in image-edit mode. Pass absolute paths of the reference images; the result is written to a new PNG whose path is returned. One instruction per call: describe the change and, when it matters, what must stay untouched (identity, layout, remaining text).",
+      "description": "Edit or restyle existing local images with a natural-language instruction, using the same SenseNova-U1.5 model in image-edit mode. Pass absolute paths of the reference images; the result is written to a new PNG whose path is returned. One instruction per call: describe the change and, when it matters, what must stay untouched (identity, layout, remaining text). A negative prompt is not supported here — the edit surface has no unconditional branch, so a non-empty negative is rejected rather than silently ignored; put the constraint in the instruction instead.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -412,6 +444,15 @@ let toolCatalogue: [[String: Any]] = [
         "additionalProperties": false
       },
       "annotations": {"title": "Describe or read an image", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+    }
+    """#),
+    json(#"""
+    {
+      "name": "model_options",
+      "title": "What the image model accepts",
+      "description": "Report what this service accepts before anything is asked of it: the sizes it can render (multiples of 32, with recommended 1:1, 3:2 and 16:9 values), the steps and cfg ranges with their per-tier defaults, that the seed is reproducible, that a negative prompt applies to generate_image but not to edit_image, where the sidecar metadata lands, which tiers are installed here, and that a dispatched request cannot be cancelled. Read-only, and it answers immediately even while another generation is running.",
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "annotations": {"title": "What the image model accepts", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     }
     """#),
     json(#"""
@@ -483,8 +524,20 @@ func summaryLine(_ response: [String: Any]) -> String {
     if let requested, requested != tier { parts.append("asked for \(requested), not installed") }
     if let steps { parts.append("\(steps) steps") }
     if let seconds { parts.append(String(format: "%.1fs", seconds)) }
-    if let seed { parts.append("seed \(seed)") }
-    return "Wrote \(path) [" + parts.joined(separator: ", ") + "]"
+    if let seed {
+        // "random" is worth saying out loud: it is the difference between a result
+        // that can be reproduced exactly and one that merely looks similar.
+        parts.append((response["seed_source"] as? String) == "random"
+            ? "seed \(seed) (random)" : "seed \(seed)")
+    }
+    if let negative = response["negative"] as? String, !negative.isEmpty {
+        parts.append("negative \"\(negative)\"")
+    }
+    var line = "Wrote \(path) [" + parts.joined(separator: ", ") + "]"
+    if let metadata = response["metadata"] as? String {
+        line += " + \(URL(fileURLWithPath: metadata).lastPathComponent)"
+    }
+    return line
 }
 
 func textBlock(_ text: String) -> [String: Any] { ["type": "text", "text": text] }
@@ -512,7 +565,7 @@ func runTool(_ name: String, _ arguments: [String: Any]) -> [String: Any] {
             return failure("prompt is required", tool: name)
         }
         payload = ["cmd": "generate", "prompt": prompt]
-        for key in ["tier", "width", "height", "steps", "cfg", "seed"] {
+        for key in ["tier", "width", "height", "steps", "cfg", "seed", "negative"] {
             if let value = arguments[key] { payload[key] = value }
         }
         inlineThumbnail = boolValue(arguments["inline_thumbnail"]) ?? false
@@ -546,6 +599,9 @@ func runTool(_ name: String, _ arguments: [String: Any]) -> [String: Any] {
     case "model_status":
         payload = ["cmd": "status"]
 
+    case "model_options":
+        payload = ["cmd": "options"]
+
     case "unload_model":
         payload = ["cmd": "unload"]
 
@@ -574,6 +630,30 @@ func runTool(_ name: String, _ arguments: [String: Any]) -> [String: Any] {
         let answer = (response["text"] as? String) ?? ""
         let seconds = doubleValue(response["seconds"]).map { String(format: "%.1fs", $0) } ?? "?"
         content.append(textBlock("\(answer)\n\n[\(seconds) on the local SenseNova-U1.5 model]"))
+    case "model_options":
+        let options = (response["options"] as? [String: Any]) ?? [:]
+        let sizes = (options["sizes"] as? [String: Any]) ?? [:]
+        let steps = (options["steps"] as? [String: Any]) ?? [:]
+        let cfg = (options["cfg"] as? [String: Any]) ?? [:]
+        let tiers = (options["tiers"] as? [String: Any]) ?? [:]
+        let sidecar = (options["sidecar"] as? [String: Any]) ?? [:]
+        let recommended = (sizes["recommended"] as? [[String: Any]] ?? []).map {
+            "\(intValue($0["width"]) ?? 0)x\(intValue($0["height"]) ?? 0) (\(($0["label"] as? String) ?? ""))"
+        }.joined(separator: ", ")
+        let available = ((tiers["available"] as? [String]) ?? []).joined(separator: ",")
+        content.append(textBlock("""
+        sizes: multiples of 32, \(intValue(sizes["minimum"]) ?? 0)...\(intValue(sizes["maximum"]) ?? 0); recommended \(recommended)
+        steps: \(intValue(steps["minimum"]) ?? 1)...\(intValue(steps["maximum"]) ?? 500) (fast \(intValue(steps["fast_default"]) ?? 8), quality \(intValue(steps["quality_default"]) ?? 50)); cfg fast \(doubleValue(cfg["fast_default"]) ?? 1.0) / quality \(doubleValue(cfg["quality_default"]) ?? 4.0)
+        seed: reproducible — same seed, same artifact, same settings writes the same bytes
+        negative: generate_image only; edit_image rejects it
+        sidecar: \((sidecar["enabled"] as? Bool) == true ? "on" : "off") — <image>.png.json (prompt + sha256, seed, size, steps, cfg, tier, artifact, seconds)
+        tiers: available=\(available.isEmpty ? "none" : available) resident=\((tiers["resident"] as? String) ?? "cold")
+        cancel: not supported — a dispatched request finishes and writes its PNG even if the client disconnects
+        output_dir: \((options["output_dir"] as? String) ?? "?")
+        """))
+        result["content"] = content
+        result["structuredContent"] = options
+        return result
     case "model_status":
         let status = (response["status"] as? [String: Any]) ?? [:]
         let resident = (status["resident_tier"] as? String) ?? "cold"
@@ -587,6 +667,9 @@ func runTool(_ name: String, _ arguments: [String: Any]) -> [String: Any] {
         resident_tier=\(resident) available_tiers=\(installed.isEmpty ? "none" : installed) \
         loads_total=\(loads) inflight=\(inflight) queue_depth=\(queued) \
         ttl_seconds=\(ttl) last_peak_mb=\(peak)
+        \(status["current"] == nil ? "" : "current=" + ((status["current"] as? [String: Any]).map { current in
+            "\(current["tool"] as? String ?? "job") step \(intValue(current["step"]) ?? 0)/\(intValue(current["total"]) ?? 0) \(intValue(current["percent"]) ?? 0)% elapsed \(doubleValue(current["elapsed_seconds"]) ?? 0)s"
+        } ?? ""))
         """))
         result["content"] = content
         result["structuredContent"] = status
