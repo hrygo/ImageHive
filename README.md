@@ -1,4 +1,4 @@
-# imagehive
+# ImageHive
 
 **本机常驻的 AI 图像服务：一份权重，所有 agent 共用。** 跑在 Apple 芯片上，
 模型是 [SenseNova-U1.5-8B-MoT](https://huggingface.co/sensenova/SenseNova-U1.5-8B-MoT)，经上游的
@@ -11,17 +11,6 @@ Swift/MLX 移植运行。
 
 在自己的 Mac 上跑文生图、按指令改图和看图问答，通过 MCP 交给 AI agent 使用。
 不需要 API key、不按张计费、图片不出本机；同一台机器上所有 agent 共用**一份**常驻权重。
-
-> **中文版为准** · 英文镜像：[README.en.md](README.en.md)（结构与本文一一对应）·
-> 交付指南：[Docs/DISTRIBUTING.zh-CN.md](Docs/DISTRIBUTING.zh-CN.md)
->
-> **名字**：叫 `imagehive`，不叫 `sensenova-u1`。模型名属于 SenseTime，放在这里会读起来像
-> 官方出品，也把仓库绑在一次模型换代上；名字只描述这套东西本身——一个常驻的本地图像服务。
-> 0.5.2 及更早叫 `sensenova-u1`，升级会由安装器自动迁移，见[从旧版本升级](#从旧版本升级)。
->
-> **版本号**：本仓库自己编号（`cli/lib/common.sh` 里的 `IH_VERSION`），并接续上游的
-> tag 序列，因此首个公开版是 **0.5.0**，当前版本 **0.6.0**。发行包里的 `BUILD-INFO.txt`
-> 记录所基于的上游提交；两套编号互不相干。
 
 ## 一句话说明
 

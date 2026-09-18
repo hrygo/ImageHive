@@ -1,4 +1,4 @@
-# imagehive
+# ImageHive
 
 **The resident local image service for your Mac: one copy of the weights, shared
 by every agent.** The model is
@@ -15,22 +15,7 @@ own Mac — served to AI agents over MCP. No API key, no per-image cost, no
 uploads: the model runs locally on Apple silicon through MLX, and every agent on
 the machine shares **one** resident copy of the weights.
 
-> **中文版为准.** The authoritative documentation is the Chinese
-> [README.md](README.md), with [Docs/DISTRIBUTING.zh-CN.md](Docs/DISTRIBUTING.zh-CN.md);
-> this file is its English mirror.
->
-> **Name.** It is `imagehive`, not `sensenova-u1`. The model name belongs to
-> SenseTime — carrying it here reads like an official product and ties the
-> repository to one model generation. The name describes the thing itself: a
-> resident local image service. Releases up to 0.5.2 were called `sensenova-u1`;
-> the installer migrates such an install, see
-> [Upgrading from an older version](#upgrading-from-an-older-version).
->
-> **Versioning.** This repository numbers its own releases (`IH_VERSION` in
-> `cli/lib/common.sh`) and continues upstream's tag sequence, so the first public
-> release is `0.5.0` and the current one is `0.6.0`. The upstream commit a build is based on is recorded in
-> `BUILD-INFO.txt` inside each release archive; the two numbering schemes are
-> independent.
+> The Chinese [README.md](README.md) is authoritative.
 
 ## At a glance
 
