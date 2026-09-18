@@ -7,7 +7,9 @@
 #   sensenova-u1 models pull NAME  download an artifact (ModelScope first)
 #   sensenova-u1 clients           which MCP clients are wired
 #   sensenova-u1 clients add X     wire a client (or `auto` for all detected)
-#   sensenova-u1 start|stop|restart|logs|unload|config|paths|generate
+#   sensenova-u1 options           what can be asked for, and what is installed
+#   sensenova-u1 start|stop|restart|logs|unload|config|paths
+#   sensenova-u1 generate --help   draw an image (seed, size, metadata, --json)
 
 set -euo pipefail
 
@@ -36,6 +38,63 @@ sv_load_conf
 
 usage() {
   sed -n '3,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+help_status() {
+  say "sensenova-u1 status — what the daemon is doing right now"
+  say "  Answers immediately, including while a generation is running: resident_tier,"
+  say "  available_tiers, loads_total, inflight, queue_depth and, when something is"
+  say "  running, current = {tool, step, total, percent, elapsed_seconds}."
+  say "  See also: sensenova-u1 options (what can be asked for), doctor (health)."
+}
+
+help_doctor() {
+  say "sensenova-u1 doctor — check every moving part; exit 1 if something is broken"
+  say "  A missing artifact is a hint, not a failure: one tier is a supported setup,"
+  say "  and the installed artifact serves requests for the other one."
+}
+
+help_models() {
+  say "${SV_BOLD}sensenova-u1 models${SV_RESET} — which artifacts are installed"
+  say ""
+  say "  models                    list presets, installed artifacts and tier mapping"
+  say "  models pull <preset>      download one (ModelScope first, then Hugging Face)"
+  say ""
+  say "  Presets: $(sv_preset_names | tr '\n' ' ')"
+  say "  After changing artifacts: sensenova-u1 restart (config.json is read at start)."
+}
+
+help_clients() {
+  say "${SV_BOLD}sensenova-u1 clients${SV_RESET} — which MCP clients are wired to this service"
+  say ""
+  say "  clients                   list every known client and whether it is wired"
+  say "  clients add <name>        wire one (Codex, Claude, opencode, QwenPaw, ...)"
+  say "  clients add auto          wire every client detected on this machine"
+  say "  clients add generic       print the JSON snippet to paste anywhere else"
+  say "  clients remove <name>     unwire one / clients snippet: print it again"
+  say ""
+  say "  Restart a client after wiring it; it reads its MCP servers at launch."
+}
+
+help_config() {
+  say "${SV_BOLD}sensenova-u1 config${SV_RESET} — the service layout and its knobs"
+  say ""
+  say "  config                    show every path and whether each tier is installed"
+  say "  config set KEY=VALUE ...  change one (SENSENOVA_MODELS, SENSENOVA_OUT, ...)"
+  say ""
+  say "  Daemon knobs live in $(sv_config): ttl_seconds, min_warm_seconds,"
+  say "  fast_artifact, quality_artifact, write_sidecar. Restart after changing either."
+}
+
+help_logs() {
+  say "sensenova-u1 logs [-f] — the daemon log at $(sv_log)"
+  say "  Startup, weight loads, tier fallbacks and errors land here; prompts, seeds and"
+  say "  settings land in each image's sidecar (<image>.png.json) instead."
+}
+
+help_unload() {
+  say "sensenova-u1 unload — release the resident weights now (about 34 GB back)"
+  say "  Reports busy instead of waiting when a generation is running."
 }
 
 cmd_status() {
@@ -297,29 +356,191 @@ cmd_config() {
   esac
 }
 
+help_generate() {
+  say "${SV_BOLD}sensenova-u1 generate${SV_RESET} — one image per request"
+  say ""
+  say "  --prompt TEXT        what to draw (required); quote text that must appear"
+  say "  --negative TEXT      what to avoid. This is the unconditional branch of"
+  say "                       guidance, so it only applies when guidance is on"
+  say "                       (quality tier, cfg > 1); the fast recipe runs cfg 1.0"
+  say "                       and ignores it"
+  say "  --width N --height N pixels, multiples of 32 only (default 1024x1024)."
+  say "                       Recommended: 1024x1024 (1:1), 1216x832 (3:2),"
+  say "                       1600x896 (16:9), 896x1600 (9:16)."
+  say "  --tier fast|quality  a preference, not a requirement: a tier that is not"
+  say "                       installed here is served by the installed one, at that"
+  say "                       artifact's own recipe (default: $(sv_default_tier))"
+  say "  --steps N            override the recipe (fast 8, quality 50)"
+  say "  --cfg F              override guidance scale (fast 1.0, quality 4.0)"
+  say "  --seed N             fix the seed. Same seed + same artifact + same settings"
+  say "                       writes byte-identical bytes; default is random"
+  say "  --n K                K images; with --seed the seeds run N, N+1, ... N+K-1"
+  say "  --out PATH           directory for the PNGs, or one file when --n 1"
+  say "  --json               print the daemon's structured result (one object, or an"
+  say "                       array when --n > 1) instead of a single line"
+  say ""
+  say "  Every image is written with a sidecar <image>.png.json holding the prompt and"
+  say "  its sha256, the seed and whether it was pinned, size, steps, cfg, tier,"
+  say "  artifact and timing — that is what makes two runs comparable afterwards."
+  say "  Output directory: $(sv_out_dir)"
+  say ""
+  say "  A request that is already running cannot be cancelled: killing this command"
+  say "  leaves the generation going and its PNG still lands (see the same note in"
+  say "  Docs/TROUBLESHOOTING.md). Progress is polled from the daemon, so it costs"
+  say "  nothing when stderr is not a terminal."
+}
+
+# The rules the daemon enforces, checked here first so a typo does not cost a round
+# trip. The daemon stays the authority: it re-checks, because the socket is open to
+# more than this CLI.
+sv_check_size() { # <value> <axis>
+  case "${1:-}" in
+    ''|*[!0-9]*) die "$2 must be a positive integer (got '${1:-}')" ;;
+  esac
+  [ "$1" -ge 32 ] || die "$2 $1 is below the minimum of 32"
+  [ "$1" -le 4096 ] || die "$2 $1 is above the maximum of 4096"
+  if [ $(( $1 % 32 )) -ne 0 ]; then
+    local down=$(( $1 / 32 * 32 ))
+    die "$2 $1 is not a multiple of 32 — the model's latent grid is $2/32, so $1 would
+       be reshaped to $down and MLX would abort the service. Use $down or $(( down + 32 ))."
+  fi
+}
+
+# <old> <new> — the caller's --out move, so the printed/JSON paths are the final ones.
+sv_generate_move() { # <source> <out> <single_file: 0|1>
+  local src="$1" out="$2" single="$3" dest
+  [ -n "$out" ] || return 0
+  if [ "$single" = "1" ]; then
+    dest="$out"
+    mkdir -p "$(dirname "$out")"
+  else
+    dest="$out/$(basename "$src")"
+    mkdir -p "$out"
+  fi
+  [ "$src" = "$dest" ] && { printf '%s\n' "$dest"; return 0; }
+  mv -f "$src" "$dest"
+  # The sidecar travels with its image: a metadata file that stayed behind would be
+  # worse than none at all.
+  [ -f "$src.json" ] && mv -f "$src.json" "$dest.json"
+  printf '%s\n' "$dest"
+}
+
 cmd_generate() {
-  local prompt="" width=1024 height=1024 tier="" args="{}"
+  local prompt="" width=1024 height=1024 tier="" seed="" count=1
+  local steps="" cfg="" negative="" out="" json=0 args="" line=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      -h|--help) help_generate; return 0 ;;
       --prompt) prompt="${2:-}"; shift 2 ;;
       --width)  width="${2:-}"; shift 2 ;;
       --height) height="${2:-}"; shift 2 ;;
       --tier)   tier="${2:-}"; shift 2 ;;
-      *) die "unknown option: $1" ;;
+      --seed)   seed="${2:-}"; shift 2 ;;
+      --n)      count="${2:-}"; shift 2 ;;
+      --steps)  steps="${2:-}"; shift 2 ;;
+      --cfg)    cfg="${2:-}"; shift 2 ;;
+      --negative) negative="${2:-}"; shift 2 ;;
+      --out)    out="${2:-}"; shift 2 ;;
+      --json)   json=1; shift ;;
+      *) die "unknown option: $1 (see: sensenova-u1 generate --help)" ;;
     esac
   done
-  [ -n "$prompt" ] || die 'usage: sensenova-u1 generate --prompt "..." [--tier fast|quality] [--width N --height N]'
+  [ -n "$prompt" ] || die 'usage: sensenova-u1 generate --prompt "..." [options] — see: sensenova-u1 generate --help'
+  case "$count" in ''|*[!0-9]*) die "--n expects a positive integer (got '$count')" ;; esac
+  [ "$count" -ge 1 ] || die "--n expects at least 1"
+  case "$seed" in ''|*[!0-9]*) [ -z "$seed" ] || die "--seed expects an unsigned integer (got '$seed')" ;; esac
+  [ -z "$steps" ] || case "$steps" in *[!0-9]*) die "--steps expects an integer (got '$steps')" ;; esac
+  [ -z "$steps" ] || { [ "$steps" -ge 1 ] && [ "$steps" -le 500 ]; } \
+    || die "--steps must be between 1 and 500"
+  sv_check_size "$width" width
+  sv_check_size "$height" height
   # Whatever is installed decides the default; the daemon would fall back to it
   # anyway, but naming it here keeps the script readable.
   [ -n "$tier" ] || tier="$(sv_default_tier)"
+  # A file target only makes sense for a single image; anything else is a directory.
+  local single_file=0
+  case "$out" in *.png|*.PNG) single_file=1 ;; esac
+  [ "$single_file" = "0" ] || [ "$count" = "1" ] || die "--out <file>.png writes one image; use a directory with --n $count"
   sv_need_python
   mkdir -p "$(sv_out_dir)"
-  args="$(python3 -c '
+
+  local i=0 old new items
+  items="$(mktemp "${TMPDIR:-/tmp}/sensenova-u1-items.XXXXXX")"
+  while [ "$i" -lt "$count" ]; do
+    args="$(python3 -c '
 import json, sys
-print(json.dumps({"prompt": sys.argv[1], "width": int(sys.argv[2]), "height": int(sys.argv[3]), "tier": sys.argv[4]}))
-' "$prompt" "$width" "$height" "$tier")"
-  printf '%s\n' \
-    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"generate_image\",\"arguments\":$args}}" \
+args = {"prompt": sys.argv[1], "width": int(sys.argv[2]), "height": int(sys.argv[3]), "tier": sys.argv[4]}
+if sys.argv[5]: args["seed"] = int(sys.argv[5])
+if sys.argv[6]: args["steps"] = int(sys.argv[6])
+if sys.argv[7]: args["cfg"] = float(sys.argv[7])
+if sys.argv[8]: args["negative"] = sys.argv[8]
+print(json.dumps(args))
+' "$prompt" "$width" "$height" "$tier" \
+      "$([ -n "$seed" ] && echo $(( seed + i )))" "$steps" "$cfg" "$negative")"
+    line="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"generate_image\",\"arguments\":$args}}"
+
+    # The request runs to completion inside the daemon (there is no cancel), so the
+    # only live signal is the daemon's own progress; poll it when a human is watching.
+    local answer_file poller=""
+    answer_file="$(mktemp "${TMPDIR:-/tmp}/sensenova-u1-generate.XXXXXX")"
+    if [ "$json" = "0" ] && [ -t 2 ]; then
+      python3 "$SV_LIB_DIR/progress.py" "$(sv_socket)" >&2 2>/dev/null &
+      poller=$!
+    fi
+    if [ "$json" = "0" ]; then
+      printf 'drawing %sx%s on the %s tier%s ...\n' "$width" "$height" "$tier" \
+        "$([ -n "$seed" ] && echo " (seed $(( seed + i )))" || echo "")" >&2
+    fi
+    printf '%s\n' "$line" | "$(sv_mcp)" 2>/dev/null > "$answer_file" || true
+    if [ -n "$poller" ]; then
+      kill "$poller" 2>/dev/null || true
+      wait "$poller" 2>/dev/null || true
+      printf '\n' >&2
+    fi
+
+    old="$(python3 "$SV_LIB_DIR/generate_result.py" path "$answer_file")" || {
+      rm -f "$answer_file" "$items"
+      exit 1
+    }
+    new="$old"
+    [ -z "$out" ] || new="$(sv_generate_move "$old" "$out" "$single_file")"
+    if [ "$json" = "1" ]; then
+      python3 "$SV_LIB_DIR/generate_result.py" json "$answer_file" "$new" >> "$items"
+    else
+      python3 "$SV_LIB_DIR/generate_result.py" text "$answer_file" "$new"
+    fi
+    rm -f "$answer_file"
+    i=$(( i + 1 ))
+  done
+
+  if [ "$json" = "1" ]; then
+    if [ "$count" = "1" ]; then
+      cat "$items"
+    else
+      python3 -c '
+import json, sys
+print(json.dumps([json.loads(l) for l in open(sys.argv[1]) if l.strip()],
+                 ensure_ascii=False, indent=2, sort_keys=True))
+' "$items"
+    fi
+  fi
+  rm -f "$items"
+}
+
+help_options() {
+  say "sensenova-u1 options — what this service accepts, and what is installed here"
+  say ""
+  say "  Answers without loading the weights, and answers while another generation is"
+  say "  running. Prints the size/step/cfg/seed rules, whether a negative prompt is"
+  say "  supported, where sidecar metadata goes, and which tiers are installed."
+}
+
+cmd_options() {
+  case "${1:-}" in
+    -h|--help) help_options; return 0 ;;
+  esac
+  sv_need_python
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"model_options","arguments":{}}}' \
     | "$(sv_mcp)" 2>/dev/null \
     | python3 -c '
 import json, sys
@@ -344,6 +565,18 @@ cmd_logs() {
 
 main() {
   local cmd="${1:-help}"; shift || true
+  # `sensenova-u1 <cmd> --help` is how anyone finds out what a subcommand takes;
+  # it used to answer "unknown option: --help".
+  local arg helper
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help)
+        helper="help_${cmd//-/_}"
+        if declare -F "$helper" >/dev/null 2>&1; then "$helper"; else usage; fi
+        return 0
+        ;;
+    esac
+  done
   case "$cmd" in
     version|--version|-v) say "sensenova-u1 $SV_VERSION" ;;
     status)   cmd_status ;;
@@ -352,6 +585,7 @@ main() {
     clients)  cmd_clients "$@" ;;
     config)   cmd_config "$@" ;;
     generate) cmd_generate "$@" ;;
+    options)  cmd_options "$@" ;;
     start)    sv_service_start && say "started $(sv_label)" ;;
     stop)     sv_service_stop && say "stopped $(sv_label)" ;;
     restart)  sv_service_start && say "restarted $(sv_label)" ;;
