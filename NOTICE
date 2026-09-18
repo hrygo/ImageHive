@@ -16,6 +16,7 @@ resident local image service on top of it. Third-party material it builds on:
    and release plumbing (Makefile, scripts/, .github/), and its documentation
    (README, README.zh-CN, CHANGELOG, NOTICE, Docs/CLIENTS, Docs/LAYOUT,
    Docs/MODELS, Docs/TROUBLESHOOTING, Docs/DISTRIBUTING + the zh-CN pair).
+   Copyright (c) 2026 hrygo.
 
 2. SenseNova-U1.5-8B-MoT model weights — https://huggingface.co/sensenova/SenseNova-U1.5-8B-MoT
    Copyright SenseTime. Apache License 2.0. The weights are NOT distributed with

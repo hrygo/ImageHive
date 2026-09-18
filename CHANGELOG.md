@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+* `LICENSE` is a plain MIT text again, with the fork's copyright line next to the
+  upstream one; the scope of the fork's additions is still spelled out in
+  `NOTICE`. The addendum that used to sit after the MIT body made GitHub report
+  the repository as `NOASSERTION` instead of MIT, which reads as "unclear
+  license" to anyone deciding whether they may use this. The archive published as
+  v0.5.0 carries the footnoted version of the same MIT terms; the legal meaning is
+  identical, so nothing needs re-releasing.
+
 ## 0.5.0 — 2026-09-18 （首个公开发行版）
 
 **版本号说明**：本 fork 在私有时用过 0.1.0–0.3.0（从未对外发布）。首个公开版
