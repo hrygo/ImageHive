@@ -82,19 +82,63 @@ struct ServiceConfig {
     /// Write `<image>.png.json` next to every image; see the sidecar note in the
     /// validation section below. `null` means the built-in default (on).
     var writeSidecar: Bool?
+    /// What is wrong with the file, in words a user can act on. A config.json that
+    /// exists but cannot be used used to be indistinguishable from no file at all:
+    /// settings were dropped with no trace anywhere, so the service quietly behaved
+    /// differently from the way it was configured (measured 2026-09-18 — a truncated
+    /// file, a type-wrong `ttl_seconds` and a 000-mode file all ran the defaults).
+    /// Reported at startup, in `status` and therefore in `doctor`.
+    var warnings: [String] = []
 
     static func load(from url: URL) -> ServiceConfig {
         var config = ServiceConfig()
-        guard let data = FileManager.default.contents(atPath: url.path),
-              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return config }
-        if let value = object["ttl_seconds"] as? Double { config.ttlSeconds = value }
-        if let value = object["ttl_seconds"] as? Int { config.ttlSeconds = Double(value) }
-        if let value = object["min_warm_seconds"] as? Double { config.minWarmSeconds = value }
-        if let value = object["min_warm_seconds"] as? Int { config.minWarmSeconds = Double(value) }
-        if let value = object["fast_artifact"] as? String, !value.isEmpty { config.fastArtifact = value }
-        if let value = object["quality_artifact"] as? String, !value.isEmpty { config.qualityArtifact = value }
-        if let value = object["write_sidecar"] as? Bool { config.writeSidecar = value }
+        let path = url.path
+        // Absent is the normal case (install.sh drives the settings through the
+        // environment), so it is not worth a word. Present-but-broken is.
+        guard FileManager.default.fileExists(atPath: path) else { return config }
+        guard let data = FileManager.default.contents(atPath: path) else {
+            config.warnings.append("\(path) cannot be read — serving the built-in defaults")
+            return config
+        }
+        let parsed: Any
+        do {
+            parsed = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            config.warnings.append("\(path) is not valid JSON ("
+                + (error as NSError).localizedDescription + ") — every setting in it is ignored")
+            return config
+        }
+        guard let object = parsed as? [String: Any] else {
+            config.warnings.append("\(path) is not a JSON object — every setting in it is ignored")
+            return config
+        }
+
+        func ignore(_ key: String, _ value: Any) {
+            config.warnings.append("\(path): \(key) must be a number, a string or true/false, got "
+                + "\(describeJSONValue(value)) — that key is ignored")
+        }
+        func number(_ key: String, _ apply: (Double) -> Void) {
+            guard let raw = object[key], !(raw is NSNull) else { return }
+            // Not `raw is Bool`: a ttl of 1 or 0 would read as a boolean and be
+            // dropped (see jsonIsBoolean).
+            if jsonIsBoolean(raw) { ignore(key, raw); return }
+            if let n = raw as? NSNumber { apply(n.doubleValue); return }
+            ignore(key, raw)
+        }
+        func text(_ key: String, _ apply: (String) -> Void) {
+            guard let raw = object[key], !(raw is NSNull) else { return }
+            guard let value = raw as? String, !value.isEmpty else { ignore(key, raw); return }
+            apply(value)
+        }
+
+        number("ttl_seconds") { config.ttlSeconds = $0 }
+        number("min_warm_seconds") { config.minWarmSeconds = $0 }
+        text("fast_artifact") { config.fastArtifact = $0 }
+        text("quality_artifact") { config.qualityArtifact = $0 }
+        if let raw = object["write_sidecar"], !(raw is NSNull) {
+            if jsonIsBoolean(raw), let flag = raw as? Bool { config.writeSidecar = flag }
+            else { ignore("write_sidecar", raw) }
+        }
         return config
     }
 }
@@ -191,21 +235,113 @@ enum RequestError {
     }
 }
 
-/// JSON numbers arrive as `NSNumber`, and a client in Python or JavaScript can send
-/// `1000.0` where Swift would only match `Int`. Accept both, so a value is either
-/// understood or absent — never silently replaced by the default.
-func intArg(_ request: [String: Any], _ key: String) -> Int? {
-    if let n = request[key] as? Int { return n }
-    if let d = request[key] as? Double { return Int(d) }
-    if let n = request[key] as? NSNumber { return n.intValue }
-    return nil
+/// Whether a value that came out of JSON is actually a boolean.
+///
+/// Swift's own `is Bool` cannot answer this: JSON numbers arrive as `__NSCFNumber`
+/// and *any* number that happens to be 0 or 1 also casts to `Bool` (measured
+/// 2026-09-18 — `1 is Bool` is true, `2 is Bool` is false). Using it as the guard in
+/// the strict readers below rejected `"seed": 1` and `"steps": 1` as booleans, which
+/// the smoke test caught. Only CoreFoundation distinguishes `__NSCFBoolean` from a
+/// number that merely looks like one.
+func jsonIsBoolean(_ value: Any) -> Bool {
+    guard let number = value as? NSNumber else { return false }
+    return CFGetTypeID(number) == CFBooleanGetTypeID()
 }
 
-func doubleArg(_ request: [String: Any], _ key: String) -> Double? {
-    if let d = request[key] as? Double { return d }
-    if let n = request[key] as? Int { return Double(n) }
-    if let n = request[key] as? NSNumber { return n.doubleValue }
-    return nil
+/// What the caller sent, in words that can be acted on.
+func describeJSONValue(_ value: Any) -> String {
+    if jsonIsBoolean(value), let flag = value as? Bool { return "the boolean \(flag)" }
+    switch value {
+    case let text as String:
+        return "the string \"\(text.count > 40 ? String(text.prefix(40)) + "…" : text)\""
+    case let list as [Any]: return "an array of \(list.count)"
+    case is [String: Any]: return "an object"
+    case let number as NSNumber: return "the number \(number)"
+    default: return "a \(type(of: value))"
+    }
+}
+
+// The readers below are the ones the model-backed commands use. A key that is
+// *present but the wrong type* is an error, never a silent fallback: a caller that
+// sends `"width": "512"` used to get 1024x1024, `"steps": "4"` used to get 50, and
+// `"seed": "126"` used to get a **random** seed — the same class of silent
+// divergence as the `negative` argument that was dropped for months. Absent still
+// means "use the default".
+func intArgStrict(_ request: [String: Any], _ key: String) throws -> Int? {
+    guard let raw = request[key] else { return nil }
+    if jsonIsBoolean(raw) { throw RequestError.bad("\(key) must be a number, got \(describeJSONValue(raw))") }
+    if let n = raw as? Int { return n }
+    if let d = raw as? Double {
+        guard d == d.rounded() else {
+            throw RequestError.bad("\(key) must be a whole number, got \(d)")
+        }
+        return Int(d)
+    }
+    if let n = raw as? NSNumber { return n.intValue }
+    throw RequestError.bad("\(key) must be a number, got \(describeJSONValue(raw))")
+}
+
+func doubleArgStrict(_ request: [String: Any], _ key: String) throws -> Double? {
+    guard let raw = request[key] else { return nil }
+    if jsonIsBoolean(raw) { throw RequestError.bad("\(key) must be a number, got \(describeJSONValue(raw))") }
+    if let d = raw as? Double { return d }
+    if let n = raw as? Int { return Double(n) }
+    if let n = raw as? NSNumber { return n.doubleValue }
+    throw RequestError.bad("\(key) must be a number, got \(describeJSONValue(raw))")
+}
+
+func stringArgStrict(_ request: [String: Any], _ key: String) throws -> String? {
+    guard let raw = request[key], !(raw is NSNull) else { return nil }
+    guard let text = raw as? String else {
+        throw RequestError.bad("\(key) must be a string, got \(describeJSONValue(raw))")
+    }
+    return text
+}
+
+func boolArgStrict(_ request: [String: Any], _ key: String) throws -> Bool? {
+    guard let raw = request[key] else { return nil }
+    guard jsonIsBoolean(raw), let flag = raw as? Bool else {
+        throw RequestError.bad("\(key) must be true or false, got \(describeJSONValue(raw))")
+    }
+    return flag
+}
+
+func stringListArgStrict(_ request: [String: Any], _ key: String) throws -> [String]? {
+    guard let raw = request[key] else { return nil }
+    guard let list = raw as? [String] else {
+        throw RequestError.bad("\(key) must be an array of paths, got \(describeJSONValue(raw))")
+    }
+    return list
+}
+
+/// The tier, accepted only under the names this service defines.
+func tierArg(_ request: [String: Any]) throws -> String? {
+    guard let raw = request["tier"] else { return nil }
+    guard let name = raw as? String else {
+        throw RequestError.bad("tier must be a string (fast or quality), got \(describeJSONValue(raw))")
+    }
+    guard ["fast", "quality", "8step", "fast8"].contains(name) else {
+        throw RequestError.bad("tier \"\(name)\" is not a tier; use fast or quality")
+    }
+    return name
+}
+
+/// Decodes reference images for a request, naming the path that failed. No model is
+/// involved, so callers do this *before* `ensureLoaded`: a request that cannot run
+/// must not pull 33 GiB of weights in first.
+func loadReferenceImages(_ paths: [String]) throws -> [EditImage] {
+    guard !paths.isEmpty else { throw RequestError.bad("images[] is required") }
+    return try paths.map { path in
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw RequestError.bad("no such image: \(path)")
+        }
+        do {
+            return try SenseNovaImageIO.loadEditImage(url: URL(fileURLWithPath: path))
+        } catch {
+            throw RequestError.bad("could not decode \(path): "
+                + (error as NSError).localizedDescription)
+        }
+    }
 }
 
 /// A pixel dimension the model can actually render.
@@ -232,7 +368,7 @@ func validatedSize(_ value: Int, _ axis: String) throws -> Int {
 /// later. Rejecting a nonsense value here avoids loading 33 GiB to find out.
 func validatedOptionalInt(_ request: [String: Any], _ key: String,
                           range: ClosedRange<Int>) throws -> Int? {
-    guard let value = intArg(request, key) else { return nil }
+    guard let value = try intArgStrict(request, key) else { return nil }
     guard range.contains(value) else {
         throw RequestError.bad("\(key) \(value) is outside the supported range "
             + "\(range.lowerBound)...\(range.upperBound)")
@@ -243,7 +379,7 @@ func validatedOptionalInt(_ request: [String: Any], _ key: String,
 /// The seed, plus whether the caller pinned it — a sidecar that says "random" is
 /// how a run repeated from scratch is told apart from one that merely looks alike.
 func validatedSeed(_ request: [String: Any]) throws -> (seed: UInt64, explicit: Bool) {
-    guard let raw = intArg(request, "seed") else {
+    guard let raw = try intArgStrict(request, "seed") else {
         return (UInt64(Int.random(in: 1...2_000_000)), false)
     }
     guard raw >= 0 else {
@@ -554,6 +690,9 @@ actor Core {
             // binding; without the pid there is no way to tell from the outside.
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
         ]
+        // Settings the daemon could not read: visible without opening the log, and
+        // `doctor` reads the same field.
+        if !serviceConfig.warnings.isEmpty { out["config_warnings"] = serviceConfig.warnings }
         if let d = lastUseAt { out["last_request_at"] = ISO8601DateFormatter().string(from: d) }
         if let d = loadedAt { out["loaded_at"] = ISO8601DateFormatter().string(from: d) }
         statusBoard.publish(out)
@@ -657,8 +796,18 @@ actor Core {
             return ["ok": false, "error": "unknown cmd '\(cmd)'"]
         }
 
-        let distilledFloor = intArg(request, "steps") ?? 50
-        let tier = (request["tier"] as? String)
+        // A malformed request is answered before anything is loaded, so a caller that
+        // gets the JSON type wrong hears about it instead of silently receiving the
+        // default behaviour (see intArgStrict).
+        let distilledFloor: Int
+        let requestedTier: String?
+        do {
+            distilledFloor = try intArgStrict(request, "steps") ?? 50
+            requestedTier = try tierArg(request)
+        } catch {
+            return ["ok": false, "error": (error as NSError).localizedDescription]
+        }
+        let tier = requestedTier
             ?? (cmd == "generate" && distilledFloor <= 12 ? "fast" : "quality")
         waiting += 1
         inflight += 1
@@ -698,13 +847,13 @@ actor Core {
     private func generate(_ request: [String: Any], tier: String) async throws -> [String: Any] {
         // Validate before ensureLoaded: a request that cannot run must not pull 33 GiB
         // of weights in first.
-        let prompt = request["prompt"] as? String ?? ""
+        let prompt = try stringArgStrict(request, "prompt") ?? ""
         guard !prompt.isEmpty else { throw RequestError.bad("prompt is required") }
-        let width = try validatedSize(intArg(request, "width") ?? 1024, "width")
-        let height = try validatedSize(intArg(request, "height") ?? 1024, "height")
+        let width = try validatedSize(try intArgStrict(request, "width") ?? 1024, "width")
+        let height = try validatedSize(try intArgStrict(request, "height") ?? 1024, "height")
         let stepsArg = try validatedOptionalInt(request, "steps", range: 1...500)
         let (seed, seedExplicit) = try validatedSeed(request)
-        let negative = (request["negative"] as? String) ?? ""
+        let negative = try stringArgStrict(request, "negative") ?? ""
         let wanted = canonicalTier(tier)
         let resident = try await ensureLoaded(wanted)
         let m = resident.model
@@ -715,7 +864,7 @@ actor Core {
         let distilled = resident.tier == "fast"
         var p = T2IParams()
         p.numSteps = stepsArg ?? (distilled ? 8 : 50)
-        p.cfgScale = Float(doubleArg(request, "cfg") ?? (distilled ? 1.0 : 4.0))
+        p.cfgScale = Float(try doubleArgStrict(request, "cfg") ?? (distilled ? 1.0 : 4.0))
         p.seed = seed
         let (cond, uncond) = promptPair(tok, prompt, negative, cfg: p.cfgScale)
         let t0 = Date()
@@ -775,18 +924,13 @@ actor Core {
     }
 
     private func loadReferences(_ request: [String: Any]) throws -> [EditImage] {
-        let paths = request["images"] as? [String] ?? []
-        guard !paths.isEmpty else {
-            throw NSError(domain: "sensenova", code: 3, userInfo: [
-                NSLocalizedDescriptionKey: "images[] is required"])
-        }
-        return try paths.map { try SenseNovaImageIO.loadEditImage(url: URL(fileURLWithPath: $0)) }
+        try loadReferenceImages(try stringListArgStrict(request, "images") ?? [])
     }
 
     private func edit(_ request: [String: Any], tier: String) async throws -> [String: Any] {
-        let prompt = request["prompt"] as? String ?? ""
+        let prompt = try stringArgStrict(request, "prompt") ?? ""
         guard !prompt.isEmpty else { throw RequestError.bad("prompt is required") }
-        if let negative = request["negative"] as? String, !negative.isEmpty {
+        if let negative = try stringArgStrict(request, "negative"), !negative.isEmpty {
             throw RequestError.bad("""
             negative is not supported on edit_image: the edit surface has no unconditional branch, \
             so it would be silently ignored (the model package rejects it for the same reason). \
@@ -795,22 +939,24 @@ actor Core {
         }
         let stepsArg = try validatedOptionalInt(request, "steps", range: 1...500)
         let (seed, seedExplicit) = try validatedSeed(request)
-        var widthArg = intArg(request, "width") ?? 0
-        var heightArg = intArg(request, "height") ?? 0
+        var widthArg = try intArgStrict(request, "width") ?? 0
+        var heightArg = try intArgStrict(request, "height") ?? 0
         if widthArg != 0 { widthArg = try validatedSize(widthArg, "width") }
         if heightArg != 0 { heightArg = try validatedSize(heightArg, "height") }
-        let targetPixels = intArg(request, "target_pixels") ?? (2048 * 2048)
+        let targetPixels = try intArgStrict(request, "target_pixels") ?? (2048 * 2048)
         guard targetPixels > 0 else {
             throw RequestError.bad("target_pixels \(targetPixels) must be positive")
         }
+        // Before ensureLoaded for the same reason as the sizes: a bad path is not worth
+        // a 33 GiB load, and decoding needs no weights.
+        let images = try loadReferences(request)
         let wanted = canonicalTier(tier)
         let resident = try await ensureLoaded(wanted)
         let m = resident.model
         let tok = resident.tokenizer
-        let images = try loadReferences(request)
         var p = T2IParams()
         p.numSteps = stepsArg ?? 50
-        p.cfgScale = Float(doubleArg(request, "cfg") ?? 4.0)
+        p.cfgScale = Float(try doubleArgStrict(request, "cfg") ?? 4.0)
         p.seed = seed
         let counts = images.map(\.tokenCount)
         var width = widthArg
@@ -830,7 +976,7 @@ actor Core {
         let image = try m.it2iGenerate(
             condIds: condIds, imgCondIds: imgCondIds, uncondIds: nil, images: images,
             width: width, height: height, params: p,
-            imgCfgScale: Float(doubleArg(request, "img_cfg") ?? 1.0),
+            imgCfgScale: Float(try doubleArgStrict(request, "img_cfg") ?? 1.0),
             onStep: { step, _ in jobProgress.advance(step) })
         eval(image)
         let seconds = Date().timeIntervalSince(t0)
@@ -853,22 +999,33 @@ actor Core {
             tool: "edit_image", prompt: prompt, negative: "", seed: p.seed,
             seedExplicit: seedExplicit, width: width, height: height, steps: p.numSteps,
             cfg: Double(p.cfgScale), resident: resident, wanted: wanted, seconds: seconds,
-            extra: ["img_cfg": doubleArg(request, "img_cfg") ?? 1.0, "source_images": references])) {
+            extra: ["img_cfg": try doubleArgStrict(request, "img_cfg") ?? 1.0,
+                    "source_images": references])) {
             out["metadata"] = sidecar.path
         }
         return out
     }
 
     private func vqa(_ request: [String: Any], tier: String) async throws -> [String: Any] {
+        let question = try stringArgStrict(request, "prompt") ?? ""
+        let paths = try stringListArgStrict(request, "images") ?? []
+        let think = try boolArgStrict(request, "think") ?? false
+        let maxTokens = try intArgStrict(request, "max_tokens") ?? 512
+        guard maxTokens >= 1, maxTokens <= 8192 else {
+            throw RequestError.bad("max_tokens \(maxTokens) is outside the supported range 1...8192")
+        }
+        // Every path has to load. This used to be a `compactMap { try? … }`, so a
+        // mistyped path was dropped and the model answered about nothing at all —
+        // an empty question and no images is not a request, it is an accident.
+        var images: [EditImage] = []
+        if !paths.isEmpty { images = try loadReferenceImages(paths) }
+        guard !images.isEmpty || !question.isEmpty else {
+            throw RequestError.bad("images[] is required (or send a prompt and no images for a text answer)")
+        }
         let wanted = canonicalTier(tier)
         let resident = try await ensureLoaded(wanted)
         let m = resident.model
         let tok = resident.tokenizer
-        let question = request["prompt"] as? String ?? ""
-        let paths = request["images"] as? [String] ?? []
-        let images: [EditImage] = paths.compactMap {
-            try? SenseNovaImageIO.loadEditImage(url: URL(fileURLWithPath: $0))
-        }
         var message = question
         if !images.isEmpty {
             message = try Conversation.expandImagePlaceholders(
@@ -876,9 +1033,9 @@ actor Core {
                 imageTokenCounts: images.map(\.tokenCount))
         }
         let ids = tok.encode(Conversation.vqaPrompt(
-            userMessage: message, think: request["think"] as? Bool ?? false))
+            userMessage: message, think: think))
         var sampling = SamplingParams()
-        sampling.maxNewTokens = request["max_tokens"] as? Int ?? 512
+        sampling.maxNewTokens = maxTokens
         let t0 = Date()
         let answer = try m.chat(ids: ids, images: images, params: sampling)
         let seconds = Date().timeIntervalSince(t0)
@@ -966,12 +1123,35 @@ do {
     seeded.wait()
 }
 signal(SIGPIPE, SIG_IGN)
+// A daemon killed by SIGTERM used to leave its socket file behind, and every
+// readiness check in the CLI and the installer is "does the socket exist" — so a
+// stop/restart could be followed by a check that succeeded against a socket nobody
+// was listening on, and the install then failed its own smoke test while the daemon
+// it had just started was still binding (measured 2026-09-18). Unlink on the way
+// out. `unlink` and `write` are async-signal-safe; nothing in the handler allocates,
+// so both strings are prepared as C buffers here, once, while the process is healthy:
+// `unlink(someSwiftString)` bridges to a temporary C string, which allocates, and a
+// signal handler must not allocate — the allocator may be mid-update when the signal
+// arrives. `strdup` is the last allocation these handlers ever need.
+let terminationNotice = strdup("sensenova-served: terminated by signal — socket removed\n")!
+let socketPathForSignal = strdup(socketPath)!
+for signalNumber in [SIGTERM, SIGINT] {
+    signal(signalNumber) { _ in
+        _ = unlink(socketPathForSignal)
+        _ = write(STDERR_FILENO, terminationNotice, strlen(terminationNotice))
+        _exit(0)
+    }
+}
 try? FileManager.default.createDirectory(
     at: URL(fileURLWithPath: socketPath).deletingLastPathComponent(),
     withIntermediateDirectories: true)
 
 guard let listenFD = openListener(socketPath) else { exit(3) }
-log("listening on \(socketPath) (ttl \(Int(ttlSeconds))s, min warm \(Int(minWarmSeconds))s)")
+// Before the "listening" line, so the reason a setting did not take effect is in
+// the log ahead of the evidence that the daemon came up anyway.
+for warning in serviceConfig.warnings { log(warning) }
+log("sensenova-served \(projectVersion) listening on \(socketPath) "
+    + "(ttl \(Int(ttlSeconds))s, min warm \(Int(minWarmSeconds))s)")
 log("home \(home.path)")
 for tier in tierNames {
     log("  tier \(tier): \(artifactDir(tier).path)\(artifactReady(tier) ? "" : " [not installed]")")
@@ -1004,16 +1184,54 @@ final class Connection {
         let core = self.core
         let writeQueue = self.writeQueue
         let thread = Thread {
+            // One JSON object per line, and the answer is written in the same shape.
+            func send(_ data: Data) {
+                writeQueue.sync {
+                    var out = data
+                    out.append(0x0A)
+                    out.withUnsafeBytes { raw in
+                        var offset = 0
+                        while offset < raw.count {
+                            let written = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                            if written <= 0 { return }
+                            offset += written
+                        }
+                    }
+                }
+            }
+            func sendError(_ message: String) {
+                let payload = ["ok": false, "error": message] as [String: Any]
+                if let data = try? JSONSerialization.data(withJSONObject: payload) { send(data) }
+            }
             var buffer = Data()
             var chunk = [UInt8](repeating: 0, count: 64 * 1024)
             while true {
                 let n = read(fd, &chunk, chunk.count)
-                if n <= 0 { break }
+                if n <= 0 {
+                    // A client that sends a request without the terminating newline and
+                    // then closes used to vanish silently; say so in the log, because
+                    // the client is waiting for an answer that is never coming.
+                    if !buffer.isEmpty {
+                        log("client disconnected with \(buffer.count) bytes and no trailing newline "
+                            + "(the protocol is one JSON object per line)")
+                    }
+                    break
+                }
                 buffer.append(contentsOf: chunk[0..<n])
+                if buffer.count > 16 * 1024 * 1024, !buffer.contains(0x0A) {
+                    log("dropping a client that sent \(buffer.count) bytes with no newline")
+                    sendError("request line is longer than 16 MiB — send one JSON object per line")
+                    break
+                }
                 while let newline = buffer.firstIndex(of: 0x0A) {
                     let line = buffer.subdata(in: buffer.startIndex..<newline)
                     buffer.removeSubrange(buffer.startIndex...newline)
-                    guard !line.isEmpty else { continue }
+                    if line.isEmpty {
+                        // A bare newline is not a request. Answering it keeps a client
+                        // (or a shell) that sends one from waiting forever.
+                        sendError("empty request — send one JSON object per line")
+                        continue
+                    }
                     Task {
                         let request = ((try? JSONSerialization.jsonObject(with: line)) as? [String: Any]) ?? [:]
                         // `status`, `options` and a busy `unload` are answered here, on
@@ -1027,18 +1245,7 @@ final class Connection {
                             response = await core.handle(request)
                         }
                         guard let data = try? JSONSerialization.data(withJSONObject: response) else { return }
-                        writeQueue.sync {
-                            var out = data
-                            out.append(0x0A)
-                            out.withUnsafeBytes { raw in
-                                var offset = 0
-                                while offset < raw.count {
-                                    let written = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
-                                    if written <= 0 { return }
-                                    offset += written
-                                }
-                            }
-                        }
+                        send(data)
                     }
                 }
             }
