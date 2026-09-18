@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for the imagehive CLI and the installers. Sourced, not run.
 
-IH_VERSION="0.6.0"
+IH_VERSION="0.6.1"
 # Layout (see Docs/LAYOUT.md). macOS conventions, every path overridable:
 #   app data  ~/Library/Application Support/ImageHive  (config, socket, weights)
 #   logs      ~/Library/Logs/ImageHive

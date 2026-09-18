@@ -29,6 +29,12 @@ GitHub Release 上。Release 页面承载资产与简短公告，本文件是长
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-19
+
+**两轮崩溃修复与一轮鲁棒性审查。** 这一版没有新功能，改的都是"外围失败"：客户端关闭管道
+时的日志写入、解析 JSON 数字时的 Swift trap、被复用的标准 fd、没有上限的连接，以及就地重写
+用户配置。每一项都留了 2026-09-19 的实测记录。
+
 ### 修复
 
 * **被拒的请求不再碰 MLX。** `handle` 的收尾统计会读 `MLX.Memory.peakMemory`，而 MLX 在
@@ -463,6 +469,8 @@ socket 文件名、发行归档名。这是破坏性变更——写进 shell pro
 * 配置迁到 `$IMAGEHIVE_HOME/config.json`（档位路径、TTL）与 `$IMAGEHIVE_HOME/service.conf`
   （安装布局）；环境变量仍然优先。
 
-[未发布]: https://github.com/hrygo/ImageHive/compare/v0.5.2...HEAD
+[未发布]: https://github.com/hrygo/ImageHive/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/hrygo/ImageHive/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/hrygo/ImageHive/releases/tag/v0.6.0
 [0.5.2]: https://github.com/hrygo/ImageHive/compare/v0.5.0...v0.5.2
 [0.5.0]: https://github.com/hrygo/ImageHive/releases/tag/v0.5.0

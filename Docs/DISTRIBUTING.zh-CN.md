@@ -87,9 +87,9 @@ bash install.sh
 版本号来自 `cli/lib/common.sh` 的 `IH_VERSION`，先改它，然后：
 
 ```bash
-make release-verify        # 生成 dist/，并把归档装进一个一次性 HOME 里验证
-V=0.6.0
+V=0.6.1                    # 先打 tag：归档里的 BUILD-INFO.txt 记的是 git describe
 git tag -a "v$V" -m "…" && git push origin "v$V"
+make release-verify        # 生成 dist/，并把归档装进一个一次性 HOME 里验证
 gh release create "v$V" --repo hrygo/ImageHive --title "…" --notes-file - \
   "dist/imagehive-$V-macos-arm64.tar.gz" \
   "dist/imagehive-$V-macos-arm64.tar.gz.sha256" \

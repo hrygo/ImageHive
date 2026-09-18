@@ -98,9 +98,9 @@ step becomes redundant for the binaries (the flag would still be cleared).
 The version is `IH_VERSION` in `cli/lib/common.sh` — bump it, then:
 
 ```bash
-make release-verify        # builds dist/, installs the tarball into a throwaway HOME
-V=0.6.0
+V=0.6.1                    # tag first: BUILD-INFO.txt records git describe
 git tag -a "v$V" -m "…" && git push origin "v$V"
+make release-verify        # builds dist/, installs the tarball into a throwaway HOME
 gh release create "v$V" --repo hrygo/ImageHive --title "…" --notes-file - \
   "dist/imagehive-$V-macos-arm64.tar.gz" \
   "dist/imagehive-$V-macos-arm64.tar.gz.sha256" \
