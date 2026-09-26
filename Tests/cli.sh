@@ -259,6 +259,19 @@ loads_after="$(loads)"
 [ "$loads_before" = "$loads_after" ] || fail "a refused argument still loaded the model"
 ok "six bad requests refused, and the model stayed unloaded (loads_total=$loads_before)"
 
+echo "== doctor checks the socket gate and reports job counters"
+[ "$(stat -f%Lp "$IMAGEHIVE_SOCKET" 2>/dev/null || echo ?)" = "600" ] \
+  || fail "the daemon socket is not owner-only"
+doctor_text="$("${cli[@]}" doctor 2>&1 || true)"
+case "$doctor_text" in
+  *"socket is owner-only"*) ok "flagged when anyone beyond this user could connect" ;;
+  *) fail "doctor says nothing about the socket gate: $doctor_text" ;;
+esac
+case "$doctor_text" in
+  *"jobs "*) ok "$(printf '%s\n' "$doctor_text" | grep -o 'jobs [0-9]* failed [0-9]*')" ;;
+  *) fail "doctor does not report the job counters: $doctor_text" ;;
+esac
+
 echo "== a bare newline gets an answer instead of silence"
 empty_reply="$(probe '')"
 case "$empty_reply" in *"empty request"*) ok "$empty_reply" ;;

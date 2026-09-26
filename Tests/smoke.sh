@@ -185,7 +185,12 @@ try:
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     probe.connect(env["IMAGEHIVE_SOCKET"])
     probe.sendall(b'{"cmd": "status"}\n')
-    answer = probe.recv(200)
+    # Read to the newline, not a fixed size: the status object grows a field
+    # now and then (jobs_total, uptime_seconds, ...) and a fixed read can stop
+    # in the middle of it.
+    answer = b""
+    while not answer.endswith(b"\n"):
+        answer += probe.recv(4096)
     probe.close()
     assert b'"resident_tier"' in answer, "the daemon stopped answering: %r" % answer
     print("   three dead log channels survived: the front end still answers ping, "
@@ -299,7 +304,10 @@ for _ in range(200):
     try:
         connection.connect(env["IMAGEHIVE_SOCKET"])
         connection.sendall(b'{"cmd": "status"}\n')
-        answer = connection.recv(300).decode(errors="replace")
+        answer = b""
+        while not answer.endswith(b"\n"):
+            answer += connection.recv(4096)
+        answer = answer.decode(errors="replace")
     except OSError:
         connection.close()
         break
@@ -310,14 +318,20 @@ for _ in range(200):
     held.append(connection)
 assert refusal, "200 connections were accepted; there is no ceiling"
 held[0].sendall(b'{"cmd": "status"}\n')
-assert b'"resident_tier"' in held[0].recv(300), "the first client was refused as well"
+held_answer = b""
+while not held_answer.endswith(b"\n"):
+    held_answer += held[0].recv(4096)
+assert b'"resident_tier"' in held_answer, "the first client was refused as well"
 for connection in held:
     connection.close()
 time.sleep(0.5)
 probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 probe.connect(env["IMAGEHIVE_SOCKET"])
 probe.sendall(b'{"cmd": "status"}\n')
-assert b'"resident_tier"' in probe.recv(300), "the service did not recover after the burst"
+recovered = b""
+while not recovered.endswith(b"\n"):
+    recovered += probe.recv(4096)
+assert b'"resident_tier"' in recovered, "the service did not recover after the burst"
 probe.close()
 print("   the connection ceiling refuses with a message (%s) and recovers" % refusal[:46])
 
@@ -354,6 +368,46 @@ case "$status" in
 esac
 case "$status" in *resident_tier=cold*) echo "   $(echo "$status" | tr '\n' ' ')" ;; *) fail "expected a cold start, got: $status";; esac
 
+echo "== the socket is owner-only, and status carries job counters"
+# The socket file is the service's only access gate (no auth on the protocol):
+# the daemon chmods it to 0600 at bind time, so anything else here means another
+# user on this Mac can hold a connection.
+[ "$(stat -f%Lp "$IMAGEHIVE_SOCKET" 2>/dev/null || echo ?)" = "600" ] \
+  || fail "socket $IMAGEHIVE_SOCKET is not owner-only: $(stat -f%Lp "$IMAGEHIVE_SOCKET" 2>/dev/null)"
+echo "   socket is 0600"
+case "$status" in *jobs_total=0*jobs_failed=0*uptime_seconds=*) echo "   counters start at zero and uptime is reported" ;; *) fail "status is missing the job counters: $status";; esac
+# A job that fails past validation (no artifact here) counts as failed; a refusal
+# (a size the model cannot render) must not count as a job at all.
+# No weights are loaded here either way: without an artifact the 256px job fails
+# in ensureLoaded (jobs_total+1, jobs_failed+1); with one installed this block is
+# skipped, because running a real generation would break the "no model needed"
+# promise of --quick (the full run below already proves success counting). In both
+# cases the refused size must never count as a job.
+if [ -z "$present_tier" ]; then
+python3 - "$IMAGEHIVE_SOCKET" <<'PYEOF' || fail "job counters did not hold up"
+import json, socket, sys
+def call(sock, payload):
+    sock.sendall((json.dumps(payload) + "\n").encode())
+    buf = b""
+    while not buf.endswith(b"\n"):
+        buf += sock.recv(65536)
+    return json.loads(buf)
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(sys.argv[1])
+before = call(sock, {"cmd": "status"})["status"]
+r = call(sock, {"cmd": "generate", "prompt": "x", "width": 256, "height": 256})
+after = call(sock, {"cmd": "status"})["status"]
+assert after.get("jobs_total", -1) == before.get("jobs_total", -2) + 1, (before, after)
+assert after.get("jobs_failed", -1) - before.get("jobs_failed", -2) in (0, 1), (before, after)
+r = call(sock, {"cmd": "generate", "prompt": "x", "width": 1000, "height": 512})
+assert r.get("ok") is False, r
+refused = call(sock, {"cmd": "status"})["status"]
+assert (refused.get("jobs_total"), refused.get("jobs_failed")) == \
+    (after.get("jobs_total"), after.get("jobs_failed")), (after, refused)
+print("   one model job counted once; a refused size counted never")
+PYEOF
+fi
+
 if [ "$QUICK" = "1" ] || [ -z "$present_tier" ]; then
   [ "$QUICK" = "1" ] && echo "== quick mode: skipping the generation assertions" \
     || echo "== no artifact on this host: skipping the generation assertions"
@@ -387,6 +441,12 @@ done
 
 loads="$("$mcp" --status | awk -F= '$1=="loads_total"{print $2}')"
 [ "$loads" = "1" ] || fail "expected exactly one load for three concurrent clients, got $loads"
+# Three finished generations, none failed: the success side of the job counters
+# (the failure side is covered above, without needing weights).
+jobs="$("$mcp" --status | awk -F= '$1=="jobs_total"{print $2}')"
+failed="$("$mcp" --status | awk -F= '$1=="jobs_failed"{print $2}')"
+[ "$jobs" = "3" ] && [ "$failed" = "0" ] \
+  || fail "expected jobs_total=3 jobs_failed=0 after three generations, got $jobs/$failed"
 residents="$(pgrep -f "imagehived" 2>/dev/null | wc -l | tr -d ' ' || true)"
 [ "$residents" -ge 1 ] || fail "daemon disappeared"
 echo "   loads_total=$loads with three concurrent clients"

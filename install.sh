@@ -698,14 +698,27 @@ PLIST
   # "It answered without a version" and "it did not answer" are different things, and
   # the second one used to be reported as if it were the first: `ih_status` prints
   # "daemon unreachable" and exits 1, which this check read as a version mismatch.
-  local status_out serving
+  local status_out serving tries=0
+  # A stale answer can be transient: the previous binary may be mid-shutdown while
+  # the new one is still binding. Reap once more and re-check rather than blessing
+  # a half-finished handover — but if the old process survives that, fail loudly
+  # instead of reporting success while every answer still comes from it.
+  while [ "$tries" -lt 3 ]; do
+    ih_socket_listening || break
+    status_out="$(ih_status 2>/dev/null || true)"
+    serving="$(printf '%s\n' "$status_out" | awk -F= '$1=="project_version"{print $2}')"
+    [ "$serving" = "$IH_VERSION" ] && break
+    ih_service_reap_stray >/dev/null 2>&1 || true
+    sleep 1
+    tries=$((tries + 1))
+  done
   if ih_socket_listening; then
     status_out="$(ih_status 2>/dev/null || true)"
     serving="$(printf '%s\n' "$status_out" | awk -F= '$1=="project_version"{print $2}')"
     if [ "$serving" = "$IH_VERSION" ]; then
       hint "daemon $serving is serving pid $(printf '%s\n' "$status_out" | awk -F= '$1=="pid"{print $2}')"
     else
-      warn "the daemon answering on $(ih_socket) is ${serving:-an older build}, not $IH_VERSION — run: imagehive restart"
+      die "the daemon answering on $(ih_socket) is ${serving:-an older build}, not $IH_VERSION — run: imagehive restart"
     fi
   else
     warn "nothing is answering on $(ih_socket) yet — the launchd job starts it on demand; check $(ih_log)"

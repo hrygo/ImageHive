@@ -223,7 +223,14 @@ cmd_doctor() {
   fi
   if [ -n "$status_out" ]; then
     field() { printf '%s\n' "$status_out" | awk -F= -v key="$1" '$1==key{print $2}'; }
-    check ok "daemon answering ($(field resident_tier) / peak $(field last_peak_mb)MB)"
+    # jobs_total/jobs_failed only exist on daemons new enough to report them;
+    # older ones get the same line as before rather than "jobs /".
+    jobs="$(field jobs_total)"; failed="$(field jobs_failed)"
+    if [ -n "$jobs" ]; then
+      check ok "daemon answering ($(field resident_tier) / jobs $jobs failed $failed / peak $(field last_peak_mb)MB)"
+    else
+      check ok "daemon answering ($(field resident_tier) / peak $(field last_peak_mb)MB)"
+    fi
     # A daemon started before this install keeps the socket and answers with the
     # previous build's behaviour — "I reinstalled and nothing changed" is this.
     local serving; serving="$(field project_version)"
@@ -238,6 +245,17 @@ cmd_doctor() {
     fi
   elif [ -x "$(ih_mcp)" ]; then
     check fail "daemon not answering" "check $(ih_log)"
+  fi
+  # The socket file is the service's only access gate (no auth on the protocol),
+  # and the daemon enforces 0600 at bind time — flag anything else before another
+  # user on this Mac can hold a connection.
+  if [ -S "$(ih_socket)" ]; then
+    if [ "$(stat -f%Lp "$(ih_socket)" 2>/dev/null || echo ?)" = "600" ]; then
+      check ok "socket is owner-only ($(ih_socket))"
+    else
+      check warn "socket $(ih_socket) is reachable beyond this user (mode $(stat -f%Lp "$(ih_socket)" 2>/dev/null || echo ?), want 600)" \
+        "restart the service to re-bind it, or remove the file if no daemon is serving it"
+    fi
   fi
 
   say "clients"

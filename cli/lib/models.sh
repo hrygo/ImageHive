@@ -120,11 +120,18 @@ ih_fetch_one() { # <url> <dest> <expected-size> <logfile>
     printf 'cached  %s\n' "$(basename "$dest")" >> "$log"
     return 0
   fi
-  curl -fL --retry 5 --retry-delay 3 --retry-connrefused -C - \
-    --connect-timeout 20 -o "$tmp" "$url" 2>>"$log" || return 1
+  if ! curl -fL --retry 5 --retry-delay 3 --retry-connrefused -C - \
+    --connect-timeout 20 -o "$tmp" "$url" 2>>"$log"; then
+    # curl's own error text (e.g. "(22)", "(7) Failed to connect", "timed out")
+    # matches no pattern the caller greps for, so leave a machine-readable mark:
+    # without it a failed batch still ends in "installed".
+    printf 'fetch_failed %s\n' "$(basename "$dest")" >> "$log"
+    return 1
+  fi
   local got; got="$(stat -f%z "$tmp" 2>/dev/null || echo 0)"
   if [ "$size" != "0" ] && [ "$got" != "$size" ]; then
     printf 'size mismatch for %s: got %s want %s\n' "$(basename "$dest")" "$got" "$size" >> "$log"
+    printf 'fetch_failed %s\n' "$(basename "$dest")" >> "$log"
     return 1
   fi
   mv "$tmp" "$dest"
@@ -189,15 +196,15 @@ ih_download_preset() {
       # Wait for the fetches only: a bare `wait` would also wait for the
       # progress loop, which never exits on its own.
       if [ "${#pids[@]}" -gt 0 ]; then
-        wait "${pids[@]}" || true
+        wait "${pids[@]}" || failed=1
         pids=()
       fi
-      grep -q 'failed\|mismatch' "$log" 2>/dev/null && failed=1
+      grep -q 'fetch_failed\|mismatch' "$log" 2>/dev/null && failed=1
       group=0
     fi
   done <<< "$listing"
   if [ "${#pids[@]}" -gt 0 ]; then
-    wait "${pids[@]}" || true
+    wait "${pids[@]}" || failed=1
     pids=()
   fi
   if [ -n "$hb" ]; then
@@ -207,10 +214,10 @@ ih_download_preset() {
 
   local bad
   bad="$(grep -c 'mismatch' "$log" 2>/dev/null || true)"
-  grep -q 'mismatch' "$log" 2>/dev/null && failed=1
+  grep -q 'fetch_failed\|mismatch' "$log" 2>/dev/null && failed=1
   tail -20 "$log" >&2
   rm -f "$log"
-  [ "$failed" = "0" ] || die "download failed (${bad} size mismatches) — re-run to resume"
+  [ "$failed" = "0" ] || die "download failed — re-run to resume (finished files are kept)"
 
   printf 'repo=%s\nsource=%s\nrevision=%s\n' "$repo" "$source" "master" > "$dir/.manifest"
   printf '%s\n' "$listing" | awk -F'\t' '{printf "size=%s\tpath=%s\n", $1, $2}' >> "$dir/.manifest"

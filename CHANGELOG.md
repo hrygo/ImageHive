@@ -29,6 +29,43 @@ GitHub Release 上。Release 页面承载资产与简短公告，本文件是长
 
 ## [Unreleased]
 
+### 新增
+
+* **服务状态多了作业计数。** `status`（以及 `imagehive status`、`model_status`、
+  `doctor`）新增 `jobs_total` / `jobs_failed` / `uptime_seconds`：自启动以来完成
+  的模型作业数、其中失败数与进程存活秒数。参数校验拒绝（尺寸越界、类型错误、
+  未知命令）从不是作业，不计入；进模型阶段后失败（缺制品、加载失败、模型错误）
+  计入。旧守护进程没有这三个字段时，前端与 `doctor` 按原样显示，不报错。
+
+### 安全
+
+* **socket 只允许本用户连接。** 守护进程在绑定后把 socket 文件 `chmod 0600`
+ （此前按默认 umask 留在 `0755 & ~umask`，多用户 Mac 上别的用户可连——而协议
+  本身没有任何认证）。`chmod` 失败则拒绝服务并删掉 socket，而不是在敞开的门
+  上继续跑；新建的 home 目录权限 `0700`（已存在的目录不动）；`doctor` 新增
+  一行检查，非 `0600` 即告警。实测 2026-09-26。
+
+### 修复
+
+* **下载失败不再报"installed"。** `ih_download_preset` 里两处
+  `wait … || true` 把 curl 退出码吞掉，而随后的 `grep 'failed\|mismatch'`
+  命中不了 curl 自己的错误文本（`(22)`、`(7) Failed to connect`、`timed out`），
+  于是整批文件缺失也会走到 `say installed` 并写 `.manifest`。现在 `wait` 直接
+  计数失败，`ih_fetch_one` 在 curl 失败或尺寸不符时写 `fetch_failed` 标记行，
+  失败即 `die`（已落盘的 Kept，中断重跑仍只补缺的）。
+* **安装器不再放过版本不一致。** 装完后应答的守护进程不是本次构建时，以前只
+  `warn` 就算安装成功——正是"重装看起来成功、其实什么都没变"的那条坑。现在重
+  收 socket 持有者并复查，最多 3 轮；仍对不上就 `die`，而不是报告成功。
+
+### 文档与测试
+
+* `Tests/smoke.sh` 新增断言（`--quick` 也跑）：socket 为 `0600`、`--status` 带
+  作业计数与 uptime、无制品时一次失败加载计为 `1/1` 而一次拒绝尺寸不计数；
+  全量模式断言三次并发成功后 `jobs_total=3 jobs_failed=0`。`Tests/cli.sh`
+  断言 `doctor` 报 socket 门与作业计数。
+* 既有测试的探针原来只读前 200/300 字节找 `resident_tier`，status 长大后会误报
+  服务已死——全部改为读到换行符为止（此为测试自身脆弱，非回归）。
+
 ## [0.6.1] - 2026-09-19
 
 **两轮崩溃修复与一轮鲁棒性审查。** 这一版没有新功能，改的都是"外围失败"：客户端关闭管道

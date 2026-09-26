@@ -413,6 +413,9 @@ func runManagementSwitch(_ flag: String) {
         let queued = status["queue_depth"] as? Int ?? 0
         let ttl = status["ttl_seconds"] as? Double ?? 0
         let peak = status["last_peak_mb"] as? Int ?? 0
+        let jobsTotal = status["jobs_total"] as? Int
+        let jobsFailed = status["jobs_failed"] as? Int
+        let uptime = status["uptime_seconds"] as? Int
         print("resident_tier=\(resident)")
         print("available_tiers=\(installed)")
         print("loads_total=\(loads)")
@@ -420,6 +423,9 @@ func runManagementSwitch(_ flag: String) {
         print("queue_depth=\(queued)")
         print("ttl_seconds=\(Int(ttl))")
         print("last_peak_mb=\(peak)")
+        if let jobsTotal { print("jobs_total=\(jobsTotal)") }
+        if let jobsFailed { print("jobs_failed=\(jobsFailed)") }
+        if let uptime { print("uptime_seconds=\(uptime)") }
         // Which build is answering, and which process. A daemon started by an older
         // install (or by hand) keeps the socket, so after an upgrade the answers can
         // still come from the previous binary; this is what makes that visible.
@@ -590,7 +596,7 @@ let toolCatalogue: [[String: Any]] = [
     {
       "name": "model_status",
       "title": "Image model status",
-      "description": "Report the state of the shared local image service: which weights are resident, how many times they have been loaded since boot, how many generations are queued or in flight, the idle-unload TTL, and the peak memory of the last job. Use it to decide whether a call will pay a model load, or to confirm that no duplicate copy is resident.",
+      "description": "Report the state of the shared local image service: which weights are resident, how many times they have been loaded since boot, how many model jobs finished and failed since boot, how many generations are queued or in flight, uptime, the idle-unload TTL, and the peak memory of the last job. Use it to decide whether a call will pay a model load, or to confirm that no duplicate copy is resident.",
       "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
       "annotations": {"title": "Image model status", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     }
@@ -801,9 +807,13 @@ func runTool(_ name: String, _ arguments: [String: Any]) -> [String: Any] {
         let queued = intValue(status["queue_depth"]) ?? 0
         let ttl = intValue(status["ttl_seconds"]) ?? 0
         let peak = intValue(status["last_peak_mb"]) ?? 0
+        let jobsTotal = intValue(status["jobs_total"]) ?? 0
+        let jobsFailed = intValue(status["jobs_failed"]) ?? 0
+        let uptime = intValue(status["uptime_seconds"]) ?? 0
         content.append(textBlock("""
         resident_tier=\(resident) available_tiers=\(installed.isEmpty ? "none" : installed) \
         loads_total=\(loads) inflight=\(inflight) queue_depth=\(queued) \
+        jobs_total=\(jobsTotal) jobs_failed=\(jobsFailed) uptime_seconds=\(uptime) \
         ttl_seconds=\(ttl) last_peak_mb=\(peak)
         \(status["current"] == nil ? "" : "current=" + ((status["current"] as? [String: Any]).map { current in
             "\(current["tool"] as? String ?? "job") step \(intValue(current["step"]) ?? 0)/\(intValue(current["total"]) ?? 0) \(intValue(current["percent"]) ?? 0)% elapsed \(doubleValue(current["elapsed_seconds"]) ?? 0)s"

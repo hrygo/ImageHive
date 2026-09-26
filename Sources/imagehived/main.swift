@@ -11,7 +11,8 @@
 //   tier tolerant    - a requested tier that is not installed is served by the
 //                      installed one, at that artifact's own recipe
 //   idle unload      - TTL after last use, with a minimum warm time
-//   observable       - loads_total / resident_tier / inflight / queue_depth
+//   observable       - loads_total / resident_tier / inflight / queue_depth /
+//                        jobs_total / jobs_failed / uptime_seconds
 //
 // Configuration: $IMAGEHIVE_HOME/config.json (see ServiceConfig below), with
 // environment variables (IMAGEHIVE_HOME, IMAGEHIVE_CONFIG, IMAGEHIVE_TTL_SECONDS,
@@ -495,6 +496,9 @@ final class StatusBoard: @unchecked Sendable {
 
 let statusBoard = StatusBoard()
 
+/// When this process started, so `status` can report uptime without the actor.
+let bootedAt = Date()
+
 // MARK: - live progress
 
 /// Step counter for the job in flight, so `status` can answer "step 23 of 50,
@@ -625,7 +629,14 @@ func optionsReport() -> [String: Any] {
 func immediateAnswer(_ request: [String: Any]) -> [String: Any]? {
     switch (request["cmd"] as? String) ?? "" {
     case "status":
-        return ["ok": true, "status": statusBoard.snapshot()]
+        // The snapshot is refreshed by the actor on every transition, but a long
+        // idle stretch leaves it stale — `uptime_seconds` especially, which moves
+        // even when nothing else does. Refresh the clock-driven fields here, on the
+        // connection thread, without touching the actor (and without MLX: no
+        // counters here may initialize Metal, see `mlxTouched`).
+        var snap = statusBoard.snapshot()
+        snap["uptime_seconds"] = Int(Date().timeIntervalSince(bootedAt))
+        return ["ok": true, "status": snap]
     case "options":
         return optionsReport()
     case "unload":
@@ -742,6 +753,12 @@ actor Core {
     private var inflight = 0
     private var waiting = 0
     private var lastPeakMB = 0
+    /// Finished model jobs (generate/edit/vqa), split by outcome. Refusals that
+    /// never reach the model (bad args, unknown cmd) are not jobs and do not
+    /// count here — these two numbers answer "how much work has this daemon
+    /// done, and how much of it failed".
+    private var jobsTotal = 0
+    private var jobsFailed = 0
     /// Whether this process has initialized MLX (Metal) yet.
     ///
     /// MLX builds its Metal device on the *first* call, wherever that call comes
@@ -772,6 +789,9 @@ actor Core {
             "loads_total": loadsTotal,
             "inflight": inflight,
             "queue_depth": waiting,
+            "jobs_total": jobsTotal,
+            "jobs_failed": jobsFailed,
+            "uptime_seconds": Int(Date().timeIntervalSince(bootedAt)),
             "ttl_seconds": ttlSeconds,
             "min_warm_seconds": minWarmSeconds,
             "last_peak_mb": lastPeakMB,
@@ -924,16 +944,28 @@ actor Core {
             publish()
         }
         do {
+            let out: [String: Any]
             switch cmd {
-            case "generate": return try await generate(request, tier: tier)
-            case "edit": return try await edit(request, tier: tier)
-            default: return try await vqa(request, tier: tier)
+            case "generate": out = try await generate(request, tier: tier)
+            case "edit": out = try await edit(request, tier: tier)
+            default: out = try await vqa(request, tier: tier)
             }
+            jobsTotal += 1
+            return out
         } catch {
+            // Validation refusals (RequestError.bad, before any load) are not jobs:
+            // they never touched the model, so counting them would conflate "callers
+            // sending bad args" with "the service failing". Everything past
+            // validation — a missing artifact, a load failure, a model error — is.
+            let ns = error as NSError
+            if !(ns.domain == "imagehive" && ns.code == 1) {
+                jobsTotal += 1
+                jobsFailed += 1
+            }
             // localizedDescription, not the NSError dump: this text is what the client
             // shows the user, and "Error Domain=... Code=1 UserInfo={...}" is not part
             // of the message.
-            return ["ok": false, "error": (error as NSError).localizedDescription]
+            return ["ok": false, "error": ns.localizedDescription]
         }
     }
 
@@ -1243,6 +1275,16 @@ func openListener(_ path: String) -> Int32? {
         close(fd)
         return nil
     }
+    // The socket file is the only gate in front of the service: whoever can
+    // connect can ask for a generation, and the default umask leaves it
+    // world-connectable on a multi-user Mac. 0600 keeps it to this user.
+    // A failure refuses to serve rather than serving on an open socket.
+    if chmod(path, 0o600) != 0 {
+        log("could not restrict \(path) to owner-only: \(String(cString: strerror(errno)))")
+        close(fd)
+        unlink(path)
+        return nil
+    }
     return fd
 }
 
@@ -1276,9 +1318,17 @@ for signalNumber in [SIGTERM, SIGINT] {
         _exit(0)
     }
 }
-try? FileManager.default.createDirectory(
-    at: URL(fileURLWithPath: socketPath).deletingLastPathComponent(),
-    withIntermediateDirectories: true)
+do {
+    try FileManager.default.createDirectory(
+        at: URL(fileURLWithPath: socketPath).deletingLastPathComponent(),
+        withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700])
+} catch {
+    log("could not create the socket directory: \(error)")
+}
+// createDirectory leaves an existing directory's permissions alone, so a home
+// created under an older umask keeps whatever it had — the socket itself is the
+// enforced boundary (see openListener), this only keeps new installs tight.
 
 guard let listenFD = openListener(socketPath) else { exit(3) }
 // Before the "listening" line, so the reason a setting did not take effect is in
