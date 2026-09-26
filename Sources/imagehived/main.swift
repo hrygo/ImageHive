@@ -117,6 +117,12 @@ struct ServiceConfig {
     /// first; without a ceiling a leaked client could wait out its whole
     /// deadline in silence.
     var queueTimeoutSeconds: Double = 300
+    /// Idle seconds after the last request before the daemon drops the MLX buffer
+    /// cache but keeps the weights. Burst use (several images, then a pause, then
+    /// nothing for hours) leaves transient tensors and buffer pools behind; sweeping
+    /// them early returns gigabytes while the next image still starts with no load.
+    /// Full unload stays on `ttlSeconds`.
+    var cacheTtlSeconds: Double = 120
     var fastArtifact = "SenseNova-U1.5-8B-MoT-8step-4bit"
     var qualityArtifact = "SenseNova-U1.5-8B-MoT-bf16"
     /// Write `<image>.png.json` next to every image; see the sidecar note in the
@@ -174,6 +180,7 @@ struct ServiceConfig {
         number("ttl_seconds") { config.ttlSeconds = $0 }
         number("min_warm_seconds") { config.minWarmSeconds = $0 }
         number("queue_timeout_seconds") { config.queueTimeoutSeconds = $0 }
+        number("cache_ttl_seconds") { config.cacheTtlSeconds = $0 }
         text("fast_artifact") { config.fastArtifact = $0 }
         text("quality_artifact") { config.qualityArtifact = $0 }
         if let raw = object["write_sidecar"], !(raw is NSNull) {
@@ -198,6 +205,7 @@ let serviceConfig = ServiceConfig.load(from: configURL)
 let ttlSeconds = environmentForConfig["IMAGEHIVE_TTL_SECONDS"].flatMap(Double.init) ?? serviceConfig.ttlSeconds
 let minWarmSeconds = environmentForConfig["IMAGEHIVE_MIN_WARM_SECONDS"].flatMap(Double.init) ?? serviceConfig.minWarmSeconds
 let queueTimeoutSeconds = environmentForConfig["IMAGEHIVE_QUEUE_TIMEOUT_SECONDS"].flatMap(Double.init) ?? serviceConfig.queueTimeoutSeconds
+let cacheTtlSeconds = environmentForConfig["IMAGEHIVE_CACHE_TTL_SECONDS"].flatMap(Double.init) ?? serviceConfig.cacheTtlSeconds
 let fastArtifact = environmentForConfig["IMAGEHIVE_FAST_ARTIFACT"] ?? serviceConfig.fastArtifact
 let qualityArtifact = environmentForConfig["IMAGEHIVE_QUALITY_ARTIFACT"] ?? serviceConfig.qualityArtifact
 let socketPath = environmentForConfig["IMAGEHIVE_SOCKET"]
@@ -659,6 +667,12 @@ func optionsReport() -> [String: Any] {
             "queue_timeout_seconds": queueTimeoutSeconds,
             "note": "a job ends at its next denoise-step boundary when cancelled or when its client disconnects; it writes no PNG and counts as cancelled, not failed. A waiter cancelled or disconnected while still queued counts as cancelled the same way. A job that waits longer than queue_timeout_seconds for its turn is refused before it starts.",
         ],
+        "idle_reclamation": [
+            "cache_ttl_seconds": cacheTtlSeconds,
+            "ttl_seconds": ttlSeconds,
+            "min_warm_seconds": minWarmSeconds,
+            "note": "two tiers: past cache_ttl_seconds the daemon drops the MLX buffer cache but keeps the weights (burst pauses stay warm); past ttl_seconds it unloads everything. A failed job sweeps the cache the same way, without unloading.",
+        ],
         "tiers": [
             "available": available,
             "resident": resident,
@@ -798,6 +812,10 @@ actor Core {
     private var inflight = 0
     private var waiting = 0
     private var lastPeakMB = 0
+    /// When the idle cache sweep last ran (nil = never). Reported in status so
+    /// `imagehive status` shows the two-tier reclamation is working, not just
+    /// that the weights are still resident.
+    private var lastCacheSweepAt: Date?
     /// Whether this process has initialized MLX (Metal) yet.
     ///
     /// MLX builds its Metal device on the *first* call, wherever that call comes
@@ -833,6 +851,7 @@ actor Core {
             "jobs_cancelled": jobCounters.snapshot().cancelled,
             "uptime_seconds": Int(Date().timeIntervalSince(bootedAt)),
             "queue_timeout_seconds": queueTimeoutSeconds,
+            "cache_ttl_seconds": cacheTtlSeconds,
             "ttl_seconds": ttlSeconds,
             "min_warm_seconds": minWarmSeconds,
             "last_peak_mb": lastPeakMB,
@@ -848,6 +867,7 @@ actor Core {
         // `doctor` reads the same field.
         if !serviceConfig.warnings.isEmpty { out["config_warnings"] = serviceConfig.warnings }
         if let d = lastUseAt { out["last_request_at"] = ISO8601DateFormatter().string(from: d) }
+        if let d = lastCacheSweepAt { out["last_cache_sweep_at"] = ISO8601DateFormatter().string(from: d) }
         if let d = loadedAt { out["loaded_at"] = ISO8601DateFormatter().string(from: d) }
         statusBoard.publish(out)
         if let current = jobProgress.snapshot() { statusBoard.publish(["current": current]) }
@@ -878,15 +898,46 @@ actor Core {
         return ["ok": true, "unloaded": tier ?? "none", "resident_tier": "cold"]
     }
 
-    /// TTL sweep: drop resident weights once idle past TTL. Never evicts while a
-    /// generation is in flight or before the minimum warm time has elapsed.
+    /// First tier of idle reclamation: drop the MLX buffer cache (transient
+    /// tensors, buffer pools) but keep the weights, so the next image in a burst
+    /// still starts with no load. Same `mlxTouched` gate as `release()`: sweeping
+    /// a cache that cannot have anything in it must not initialize Metal.
+    private func sweepCache() {
+        guard mlxTouched else { return }
+        MLX.Memory.clearCache()
+        lastCacheSweepAt = Date()
+        if mlxTouched { lastPeakMB = MLX.Memory.peakMemory / (1 << 20) }
+        publish()
+    }
+
+    /// Idle sweeps, two tiers. Past `cache_ttl_seconds` the daemon drops the MLX
+    /// buffer cache but keeps the weights (burst pauses stay warm); past
+    /// `ttl_seconds` it unloads everything (long idle frees the gigabytes).
+    /// Neither runs while a generation is in flight, while a load is pending, or
+    /// before the minimum warm time has elapsed.
     func tick(now: Date = Date()) {
         guard inflight == 0, model != nil, pendingLoad == nil else { return }
         let idle = now.timeIntervalSince(lastUseAt ?? now)
         let warm = now.timeIntervalSince(loadedAt ?? now)
-        if idle >= ttlSeconds, warm >= minWarmSeconds {
+        guard warm >= minWarmSeconds else { return }
+        if idle >= ttlSeconds {
             log("idle \(Int(idle))s >= ttl, unloading \(residentTier ?? "?")")
             release()
+            return
+        }
+        // Re-sweep at most once per cache TTL: without the second clause every
+        // 5s tick past the TTL would clear a cache the next request is about to
+        // refill, churning for nothing.
+        if idle >= cacheTtlSeconds {
+            if let swept = lastCacheSweepAt {
+                if now.timeIntervalSince(swept) >= cacheTtlSeconds {
+                    log("idle \(Int(idle))s >= cache ttl, sweeping MLX cache (weights stay resident)")
+                    sweepCache()
+                }
+            } else {
+                log("idle \(Int(idle))s >= cache ttl, sweeping MLX cache (weights stay resident)")
+                sweepCache()
+            }
         }
     }
 
@@ -933,6 +984,10 @@ actor Core {
             resident = try await task.value
         } catch {
             pendingLoad = nil
+            // A load that fails halfway leaves partially materialized arrays in
+            // the MLX cache; drop them now instead of letting the next load or
+            // generation inherit them.
+            sweepCache()
             throw error
         }
         model = resident.model
@@ -1034,6 +1089,12 @@ actor Core {
             let ns = error as NSError
             if !(ns.domain == "imagehive" && ns.code == 1) {
                 jobCounters.noteFinished(failed: true)
+                // A job that failed past validation may leave transient tensors
+                // behind (half-run denoise, half-written output). Sweep them now
+                // rather than carrying them into the next request's peak: the
+                // weights stay resident, only the dregs go. Same gate as the
+                // idle sweep — a failure that never touched MLX sweeps nothing.
+                sweepCache()
             }
             // localizedDescription, not the NSError dump: this text is what the client
             // shows the user, and "Error Domain=... Code=1 UserInfo={...}" is not part

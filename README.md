@@ -221,8 +221,9 @@ imagehive paths      # 打印所有路径
 ```
 
 守护进程**按需启动**：空闲一段时间后的第一次调用会加载权重（约 5 秒），之后所有调用
-复用它；空闲 10 分钟（`ttl_seconds`，在
-`~/Library/Application Support/ImageHive/config.json`）自动卸载，不会一直占着
+复用它；空闲 2 分钟（`cache_ttl_seconds`）先清 MLX 缓存、权重保持常驻，空闲
+10 分钟（`ttl_seconds`，都在
+`~/Library/Application Support/ImageHive/config.json`）再自动卸载，不会一直占着
 30 多 GB。
 
 ## 可复现的评测
@@ -269,7 +270,7 @@ MCP 前端是一层薄薄的无状态桥；守护进程持有模型并串行生�
 两个文件，都可选，都是纯 JSON / shell：
 
 * `~/Library/Application Support/ImageHive/config.json` —— `ttl_seconds`、
-  `min_warm_seconds`、`fast_artifact`、`quality_artifact`（相对路径以权重根目录为基准，
+  `min_warm_seconds`、`cache_ttl_seconds`、`fast_artifact`、`quality_artifact`（相对路径以权重根目录为基准，
   绝对路径原样使用）。
 * `~/Library/Application Support/ImageHive/service.conf` —— 安装布局（home、models、
   prefix、launchd label、socket）。由 `install.sh` 写入；
@@ -303,7 +304,8 @@ MCP 前端是一层薄薄的无状态桥；守护进程持有模型并串行生�
 * **回复里写 `asked for fast, not installed`** —— 正常：这台机器只装了另一档，服务用
   已装档位完成，并如实告诉你实际用的是哪一档。
 * **内存吃紧** —— `imagehive unload` 立刻释放；想更自动就把 `ttl_seconds` 改小
-  （例如 120）。实际开销看 `imagehive status` 的 `last_peak_mb`。
+  （例如 120），只想早点还缓存就把 `cache_ttl_seconds` 改小。实际开销看
+  `imagehive status` 的 `last_peak_mb`。
 * **报错 `seed must be a number, got the string "126"`（`width` 同理）** —— 参数是强类型
   的：数字要传数字（`"width": 512`，不是 `"width": "512"`），只有"不传"才等于用默认值。
   0.5.2 之前这类参数会被静默替换成默认值——字符串 seed 会变成**随机** seed。

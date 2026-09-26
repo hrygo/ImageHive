@@ -408,6 +408,30 @@ assert (after.get("jobs_total"), after.get("jobs_failed"), after.get("jobs_cance
     (before.get("jobs_total"), before.get("jobs_failed"), before.get("jobs_cancelled")), (before, after)
 print("   unknown-token cancel, mistyped cancel, and the options contract; counters untouched")
 PYEOF
+# The two-tier idle contract, observable without weights: the daemon reports
+# cache_ttl_seconds, and a past-validation failure (no artifact here) leaves no
+# job uncounted. The live sweep itself (weights stay resident) is proven against
+# real weights outside CI — see CHANGELOG.
+python3 - "$IMAGEHIVE_SOCKET" <<'PYEOF' || fail "idle-reclamation contract did not hold up"
+import json, socket, sys
+def call(payload):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(sys.argv[1])
+    sock.sendall((json.dumps(payload) + "\n").encode())
+    buf = b""
+    while not buf.endswith(b"\n"):
+        buf += sock.recv(65536)
+    sock.close()
+    return json.loads(buf)
+opts = call({"cmd": "options"})["options"]
+reclaim = opts.get("idle_reclamation", {})
+assert isinstance(reclaim.get("cache_ttl_seconds"), (int, float)), opts
+assert isinstance(reclaim.get("ttl_seconds"), (int, float)), opts
+st = call({"cmd": "status"})["status"]
+assert isinstance(st.get("cache_ttl_seconds"), (int, float)), st
+assert st.get("resident_tier") == "cold", st
+print("   cache_ttl_seconds reported by options and status; still cold")
+PYEOF
 # A job that fails past validation (no artifact here) counts as failed; a refusal
 # (a size the model cannot render) must not count as a job at all.
 # No weights are loaded here either way: without an artifact the 256px job fails

@@ -249,8 +249,9 @@ imagehive paths       # every path this install uses
 ```
 
 The daemon starts on demand: the first request after an idle period loads the
-weights (~5 s) and they are released again after 10 minutes of idleness
-(`ttl_seconds` in `~/Library/Application Support/ImageHive/config.json`).
+weights (~5 s); idle 2 minutes (`cache_ttl_seconds`) sweeps the MLX cache while
+the weights stay resident, and 10 minutes of idleness (`ttl_seconds`, both in
+`~/Library/Application Support/ImageHive/config.json`) unloads everything.
 Nothing keeps 35 GB pinned down unless you are actively using it.
 
 ## Reproducible runs
@@ -305,7 +306,7 @@ starts share a single load. The project's own smoke test asserts exactly that
 Two files, both optional and both plain JSON/shell:
 
 * `~/Library/Application Support/ImageHive/config.json` — `ttl_seconds`,
-  `min_warm_seconds`, `fast_artifact`, `quality_artifact` (names are relative to
+  `min_warm_seconds`, `cache_ttl_seconds`, `fast_artifact`, `quality_artifact` (names are relative to
   the models root unless absolute).
 * `~/Library/Application Support/ImageHive/service.conf` — install layout
   (home, models, prefix, launchd label, socket). Written by `install.sh`;

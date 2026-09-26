@@ -27,6 +27,25 @@
 GitHub Release 上。Release 页面承载资产与简短公告，本文件是长期记录。具体命令见
 [Docs/DISTRIBUTING.zh-CN.md](Docs/DISTRIBUTING.zh-CN.md)。
 
+## [Unreleased]
+
+### 新增
+
+* **空闲回收分两档，burst 间歇不再白占内存。** `tick()` 里 idle 过
+  `cache_ttl_seconds`（默认 120s，可配，`IMAGEHIVE_CACHE_TTL_SECONDS`）只清 MLX
+  缓存、权重保持常驻——连画几张后的冷却期还回中间张量与 buffer 池，下张图零
+  加载；过 `ttl_seconds` 才全卸（行为不变）。进模型阶段后失败的作业与加载失败
+  走同一个 sweep，不卸权重。`status` 新增 `cache_ttl_seconds` 与
+  `last_cache_sweep_at`，`options` 新增 `idle_reclamation` 节。实测 2026-09-26
+  （quality bf16）：idle 12s 自动 sweep、档位保持 fast；TTL 10s 全卸后重载
+  `loads_total=2`。另修复 sweep 条件把 `||` 与条件列表混写导致的恒假（40s 无
+  sweep，见 LOCAL-SERVICE）。
+
+### 文档与测试
+
+* `Tests/smoke.sh` 断言 `options.idle_reclamation` 与 `status` 的
+  `cache_ttl_seconds`（无制品可跑）；live sweep/TTL 链路见上条实测。
+
 ## [0.6.3] - 2026-09-26
 
 ### 新增

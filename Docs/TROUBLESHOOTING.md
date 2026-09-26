@@ -203,9 +203,13 @@ whose size already matches. `imagehive models verify` compares the files on
 disk with the recorded manifest.
 
 **Memory pressure while the model is resident.**
-`imagehive unload` releases the weights immediately. To make that automatic
-sooner, lower `ttl_seconds` (for example 120). Check what a run actually cost
-with `last_peak_mb` from `imagehive status`.
+`imagehive unload` releases the weights immediately. Short of that, the daemon
+already reclaims in two tiers on its own: idle past `cache_ttl_seconds`
+(default 120 s) drops the MLX buffer cache while the weights stay resident
+(`last_cache_sweep_at` in `imagehive status`), and idle past `ttl_seconds`
+unloads everything — so lowering `ttl_seconds` (for example 120) is the sooner
+automatic full release, and lowering `cache_ttl_seconds` is the sooner partial
+one. Check what a run actually cost with `last_peak_mb`.
 
 **Slow downloads from Hugging Face in China.**
 The default source is ModelScope, which needs no proxy. If you must use Hugging

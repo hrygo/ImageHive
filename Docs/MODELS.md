@@ -66,7 +66,11 @@ only the bytes that are missing.
 
 The daemon holds **one** tier at a time: asking for the other tier releases the
 first. `imagehive status` shows `resident_tier`, `last_peak_mb` and
-`loads_total`.
+`loads_total`. Idle reclamation has two tiers of its own: past
+`cache_ttl_seconds` (default 120 s) the daemon drops the MLX buffer cache but
+keeps the weights — burst pauses stay warm while transient tensors go back;
+past `ttl_seconds` it unloads everything. A failed job sweeps the cache the
+same way, without unloading.
 
 ## One artifact is enough
 
@@ -105,6 +109,7 @@ Point the daemon at any directory with the same shape:
 {
   "ttl_seconds": 600,
   "min_warm_seconds": 60,
+  "cache_ttl_seconds": 120,
   "quality_artifact": "/absolute/or/relative/path/to/quality"
 }
 ```

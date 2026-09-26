@@ -813,6 +813,7 @@ func runTool(_ name: String, _ arguments: [String: Any], token: String) -> [Stri
         let cfg = (options["cfg"] as? [String: Any]) ?? [:]
         let tiers = (options["tiers"] as? [String: Any]) ?? [:]
         let sidecar = (options["sidecar"] as? [String: Any]) ?? [:]
+        let reclaim = (options["idle_reclamation"] as? [String: Any]) ?? [:]
         let recommended = (sizes["recommended"] as? [[String: Any]] ?? []).map {
             "\(intValue($0["width"]) ?? 0)x\(intValue($0["height"]) ?? 0) (\(($0["label"] as? String) ?? ""))"
         }.joined(separator: ", ")
@@ -825,6 +826,7 @@ func runTool(_ name: String, _ arguments: [String: Any], token: String) -> [Stri
         sidecar: \((sidecar["enabled"] as? Bool) == true ? "on" : "off") — <image>.png.json (prompt + sha256, seed, size, steps, cfg, tier, artifact, seconds)
         tiers: available=\(available.isEmpty ? "none" : available) resident=\((tiers["resident"] as? String) ?? "cold")
         cancel: supported — send notifications/cancelled for the request id, or cancel <token>; a cancelled job writes no PNG and counts as cancelled, not failed. Queued past the timeout the daemon refuses instead of hanging.
+        idle: cache sweep after \(intValue(reclaim["cache_ttl_seconds"]) ?? 0)s (weights stay resident), full unload after \(intValue(reclaim["ttl_seconds"]) ?? 0)s; a failed job sweeps the cache the same way
         output_dir: \((options["output_dir"] as? String) ?? "?")
         """))
         result["content"] = content

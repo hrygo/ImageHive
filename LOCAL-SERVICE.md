@@ -91,6 +91,12 @@ git rebase upstream/main main
   客户端断开只取消它自己的作业；排队超时的 waiter 直接被拒。作业计数器移出 actor
   加锁保护（`JobCounters`），actor 正忙时取消计数也能立刻可见——代价是计数器不再
   享受 actor 隔离，改动时记住它有三处写者（完成、失败、取消）。
+- **空闲回收分两档**：`tick()` 里 idle 过 `cache_ttl_seconds`（默认 120s）只
+  `clearCache()`、权重常驻（burst 间歇保持零加载）；过 `ttl_seconds` 才全卸。
+  失败作业（进模型阶段后报错、加载失败）走同一个 sweep，不卸权重。sweep 最多一
+  个 cache TTL 一次，避免每 5s tick 空转。`if A, B || C` 混写条件列表在 Swift
+  里按逗号语义解析——`lastCacheSweepAt == nil` 时后面的 `let` 绑定必失败，整个
+  条件恒假（实测 2026-09-26：40s 无 sweep），必须拆成嵌套 if。
 - **状态与进度不进 actor**：`status`、`options`、忙碌时的 `unload` 由连接线程从
   `StatusBoard` 快照直接回答。原先它们排在长同步的 `t2iGenerate` 后面，实测一次
   1536x1024/50 步生成会把 `model_status` 阻塞 75.3s（"忙"与"卡死"因此无法区分）。
