@@ -27,7 +27,7 @@
 GitHub Release 上。Release 页面承载资产与简短公告，本文件是长期记录。具体命令见
 [Docs/DISTRIBUTING.zh-CN.md](Docs/DISTRIBUTING.zh-CN.md)。
 
-## [Unreleased]
+## [0.6.3] - 2026-09-26
 
 ### 新增
 
