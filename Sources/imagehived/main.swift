@@ -1023,6 +1023,14 @@ actor Core {
         } catch {
             return ["ok": false, "error": (error as NSError).localizedDescription]
         }
+        // A waiter can be cancelled after the connection thread's pre-handle
+        // check but before the actor starts running it. Cancellation is not a
+        // model failure: count it exactly like a queued disconnect and return
+        // without touching the model or entering the inflight/waiting window.
+        if Task.isCancelled {
+            jobCounters.noteCancelled()
+            return ["ok": false, "error": "cancelled", "cancelled": true, "token": token]
+        }
         // Second half of the queue-timeout gate. The connection thread only
         // forwards when `inflight == 0`, but two waiters can both see zero and
         // enter one after the other — the loser finds `inflight > 0` here and
@@ -1509,11 +1517,22 @@ final class JobRegistry: @unchecked Sendable {
     /// jobs — other connections' generations keep running.
     private var owners: [String: ObjectIdentifier] = [:]
 
-    func add(_ token: String, _ task: Task<Void, Never>, owner: Connection) {
+    /// Registers a task unless its owner has already gone away. The check and
+    /// the insertion share this queue, and `Connection.disconnect` flips its
+    /// flag before calling `cancelMine`, so a disconnect can only do one of two
+    /// things: it is seen here (the task is refused and the caller cancels it),
+    /// or it happens after registration (`cancelMine` finds the token). There is
+    /// no interval where the token is invisible to both.
+    @discardableResult
+    func add(_ token: String, _ task: Task<Void, Never>, owner: Connection) -> Bool {
+        var accepted = false
         queue.sync {
+            guard !owner.isDisconnected else { return }
             tasks[token] = task
             owners[token] = ObjectIdentifier(owner)
+            accepted = true
         }
+        return accepted
     }
     func remove(_ token: String) {
         queue.sync {
@@ -1558,6 +1577,44 @@ final class Connection {
     init(fd: Int32, core: Core) {
         self.fd = fd
         self.core = core
+    }
+
+    /// The connection thread sets this once, before cancelling its registered
+    /// jobs. `JobRegistry.add` may read it from the registry queue, so it needs
+    /// a lock. The flag is what closes the registration/disconnect race: either
+    /// registration wins and `cancelMine` cancels the task, or this flag wins
+    /// and registration refuses the task for the caller to cancel.
+    private let stateLock = NSLock()
+    private var disconnected = false
+
+    var isDisconnected: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return disconnected
+    }
+
+    /// Mark the connection gone before touching the registry. Called exactly
+    /// once, on the connection thread, when the read loop reaches EOF or an
+    /// error.
+    func disconnect() {
+        stateLock.lock()
+        let first = !disconnected
+        disconnected = true
+        stateLock.unlock()
+        if first { registry.cancelMine(self) }
+    }
+
+    /// A waiter cancelled before it reaches the model still has to be counted
+    /// and published immediately, even while the actor is busy with the job
+    /// ahead of it. Kept outside the actor for that reason.
+    private func noteQueuedCancellation(token: String) {
+        registry.remove(token)
+        jobCounters.noteCancelled()
+        var snap = statusBoard.snapshot()
+        let counts = jobCounters.snapshot()
+        snap["jobs_total"] = counts.total
+        snap["jobs_failed"] = counts.failed
+        snap["jobs_cancelled"] = counts.cancelled
+        statusBoard.publish(snap)
     }
 
     /// Interrupt the job named by `token`, if it is still outstanding on this
@@ -1710,23 +1767,24 @@ final class Connection {
                                 try? await Task.sleep(nanoseconds: 200_000_000)
                             }
                             if queuedOutcome == "cancelled" {
-                                me.registry.remove(token)
-                                jobCounters.noteCancelled()
-                                // The actor may be busy running a generation; publish
-                                // from the last snapshot so `status` shows the count
-                                // now instead of once the actor drains.
-                                var snap = statusBoard.snapshot()
-                                let counts = jobCounters.snapshot()
-                                snap["jobs_total"] = counts.total
-                                snap["jobs_failed"] = counts.failed
-                                snap["jobs_cancelled"] = counts.cancelled
-                                statusBoard.publish(snap)
+                                me.noteQueuedCancellation(token: token)
                                 return
                             }
                             if queuedOutcome == "timeout" {
                                 me.registry.remove(token)
                                 sendError("queued \(Int(Date().timeIntervalSince(queuedAt)))s for a busy service " +
                                     "(limit \(Int(queueTimeoutSeconds))s) — retry later")
+                                return
+                            }
+                            // `Task.sleep` is cancelled by throwing, and the
+                            // `try?` above turns that into an immediate loop
+                            // turn. If the job ahead of us finished at the same
+                            // moment, the `while` condition now sees zero and
+                            // exits with `queuedOutcome == "turn"`. Do not
+                            // mistake that for our turn: a cancelled waiter
+                            // must never enter the model.
+                            if Task.isCancelled {
+                                me.noteQueuedCancellation(token: token)
                                 return
                             }
                         }
@@ -1746,16 +1804,19 @@ final class Connection {
                         send(data)
                     }
                     if let token {
-                        // A cancel (or a disconnect) that landed between Task
-                        // creation and registration: honour it now rather than
-                        // running a job nobody wants.
-                        let alreadyCancelled = task.isCancelled
-                        me.registry.add(token, task, owner: me)
-                        if alreadyCancelled { task.cancel() }
+                        // Registration and disconnect are ordered through the
+                        // registry: if the owner is already gone, `add` refuses
+                        // the token and this cancellation is what stops the Task.
+                        // That removes the old window where EOF cleanup could
+                        // run before registration, find no token, and leave the
+                        // task to start for a client that had already left.
+                        if !me.registry.add(token, task, owner: me) {
+                            task.cancel()
+                        }
                     }
                 }
             }
-            JobRegistry.shared.cancelMine(self)
+            self.disconnect()
             close(fd)
             onFinish()
         }

@@ -654,4 +654,79 @@ else
 fi
 wait "$slow_pid" || true
 
+echo "== a queued client that disconnects is cancelled, not started"
+python3 - "$IMAGEHIVE_SOCKET" "$present_tier" <<'PY' || fail "a queued disconnect was not cancelled"
+import json, socket, sys, time
+
+sock_path, tier = sys.argv[1], sys.argv[2]
+
+
+def call(payload):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(sock_path)
+    sock.sendall((json.dumps(payload) + "\n").encode())
+    buf = b""
+    while not buf.endswith(b"\n"):
+        chunk = sock.recv(65536)
+        if not chunk:
+            raise RuntimeError("daemon closed before replying")
+        buf += chunk
+    sock.close()
+    return json.loads(buf)
+
+
+def status():
+    return call({"cmd": "status"})["status"]
+
+
+def request(payload):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(sock_path)
+    sock.sendall((json.dumps(payload) + "\n").encode())
+    return sock
+
+
+before = status()
+holder = request({
+    "cmd": "generate", "token": "queue-holder-disconnect-test",
+    "prompt": "queue holder", "tier": tier,
+    "width": 512, "height": 512, "steps": 50, "seed": 91001,
+})
+deadline = time.time() + 60
+while time.time() < deadline:
+    snap = status()
+    current = snap.get("current") or {}
+    if current.get("token") == "queue-holder-disconnect-test":
+        break
+    time.sleep(0.1)
+else:
+    raise AssertionError("the holder never became the running job: %r" % status())
+
+waiter = request({
+    "cmd": "generate", "token": "queue-waiter-disconnect-test",
+    "prompt": "queue waiter", "tier": tier,
+    "width": 512, "height": 512, "steps": 50, "seed": 91002,
+})
+time.sleep(1.0)  # the connection thread has registered the waiter by now
+waiter.close()
+
+deadline = time.time() + 30
+final = None
+while time.time() < deadline:
+    snap = status()
+    if snap.get("jobs_cancelled", 0) > before.get("jobs_cancelled", 0):
+        final = snap
+        break
+    current = snap.get("current") or {}
+    if current.get("token") == "queue-waiter-disconnect-test":
+        raise AssertionError("the disconnected waiter started running: %r" % snap)
+    time.sleep(0.1)
+if final is None:
+    raise AssertionError("the disconnected waiter was not cancelled: %r" % status())
+
+holder.close()
+print("   jobs_cancelled %s -> %s; waiter never became current"
+      % (before.get("jobs_cancelled"), final.get("jobs_cancelled")))
+PY
+
 echo "PASS"

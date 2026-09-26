@@ -27,6 +27,18 @@
 GitHub Release 上。Release 页面承载资产与简短公告，本文件是长期记录。具体命令见
 [Docs/DISTRIBUTING.zh-CN.md](Docs/DISTRIBUTING.zh-CN.md)。
 
+## [未发布]
+
+### 修复
+
+* **排队客户端断开后任务不再漏取消。** 连接 EOF 清理与任务注册原先会各自观察
+  `task.isCancelled` 与 `JobRegistry`，排队任务可能在客户端离开后继续等待，甚至
+  开始生成。现在 `Connection.disconnect()` 先设置带锁的断开标志，
+  `JobRegistry.add` 与 `cancelMine` 在同一个串行队列上协商：注册先发生则
+  `cancelMine` 能找到 token，断开先发生则注册直接拒绝并取消 Task。任务在排队
+  结束到进入模型之间、以及 actor 入口各再检查一次取消，命中的等待任务立即增加
+  `jobs_cancelled` 并按 `cancelled` 返回，不会被当成成功作业。
+
 ## [0.6.4] - 2026-09-27
 
 ### 新增
