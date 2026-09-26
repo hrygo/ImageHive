@@ -318,13 +318,16 @@ MCP 前端是一层薄薄的无状态桥；守护进程持有模型并串行生�
 
 与其让人事后发现，不如写在这里：
 
-* **已派发的请求无法取消。** 它会在守护进程里跑完并落盘，客户端断开也一样；
-  `model_options.cancellation.supported` 直接报 `false`，不做假装成功的取消。
+* **取消只停"未来的工作"，不不给已写完的回复。** 运行中的作业在下一个
+  denoise-step 边界结束、不写 PNG（`cancel <token>`、MCP `notifications/cancelled`、
+  或 `imagehive generate` 下按 Ctrl-C）；排队超时的等待者直接被拒。客户端断开只
+  取消它自己的作业。
 * **不提供 HTTP 端点，这是设计。** 传输走 app home 里的 unix socket，socket 文件
   **就是**锁：没有端口要开放，也没有第二个可能加载第二份权重的入口。
 * **同一时刻只有一个档位**（`cold | fast | quality`）。守护进程最多持有一个制品，
   因为同时持有两个正是这个项目要避免的内存开销。
-* **请求是串行的**，也还没有 MCP tasks 扩展：一次工具调用会阻塞到图片写完。
+* **请求是串行的**，也还没有 MCP tasks 扩展：一次工具调用会阻塞到图片写完
+  （取消与排队超时是 backstop，不是并行）。
 * **只支持 Apple 芯片 + macOS 26 及以上。** MLX 不支持 Intel Mac。
 
 ## 卸载

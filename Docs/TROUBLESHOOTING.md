@@ -174,17 +174,23 @@ are loaded. `imagehive options` lists the recommended sizes (1024×1024,
 1216×832, 1600×896, 896×1600).
 
 **I killed a run, and the image appeared anyway.**
-That is expected, and it is why the daemon tracks work by request rather than by
-connection: a request that has already been dispatched runs to completion and
-writes its PNG even if the client process is gone, because cancelling mid-flight
-would leave the model in an unknown state. There is no cancel command
-(`model_options` reports `cancellation.supported: false`). A batch that is
-interrupted therefore leaves images behind — count them, or clear the output
-directory, before trusting a sample count.
+That is expected only when the run had already finished: a cancelled or
+disconnected job ends at its next denoise-step boundary and writes no PNG — it
+counts as cancelled (`jobs_cancelled` in `imagehive status`), not failed. Kill
+the client while its job is still queued and the waiter never starts at all.
+The token of the running job is in `status.current.token`; `cancel <token>`
+(or MCP `notifications/cancelled`, or Ctrl-C on `imagehive generate`) stops it.
+What killing cannot give you is the reply: the daemon answers to whoever is
+still listening, and a client that already went away never hears it — but the
+GPU time is saved either way.
 
-**Two clients, one at a time.**
+**Two clients, one at a time — and a queue that refuses instead of hanging.**
 Generations are serialised inside the daemon on purpose: one resident model,
-one GPU. A second request waits its turn (`queue_depth` in `imagehive status`).
+one GPU. A second request waits its turn; a waiter that waits longer than
+`queue_timeout_seconds` (default 300s, `config.json` or
+`IMAGEHIVE_QUEUE_TIMEOUT_SECONDS`) is refused with "queued Ns for a busy
+service (limit Ns) — retry later" instead of holding the caller past its
+deadline. The refusal is not a job and touches no counter.
 
 **`another instance is live at …` in the log.**
 A daemon already owns the socket. That is the single-instance protection, not an

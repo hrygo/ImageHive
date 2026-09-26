@@ -276,10 +276,12 @@ prints the same facts as a machine-readable object (an array when `--n > 1`), an
 `--out` moves the image and its sidecar together. `imagehive generate --help`
 lists every flag.
 
-One thing to know before a batch run: **a dispatched request cannot be
-cancelled.** Killing the command does not stop the generation and its PNG still
-lands — see [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md). Wait for each
-reply before sending the next one if you are counting samples.
+One thing to know before a batch run: **a running job can be cancelled**
+(`cancel <token>`, MCP `notifications/cancelled`, or Ctrl-C on
+`imagehive generate`) — it ends at its next denoise step and writes no PNG —
+and a waiter queued past the timeout is refused instead of hanging. A disconnect
+cancels only that client's own jobs. See
+[Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md).
 
 ### One model, many agents
 
@@ -341,9 +343,9 @@ output of `imagehive doctor` and the daemon log (`imagehive logs`).
 
 Named here rather than discovered later:
 
-* **A dispatched request cannot be cancelled.** It runs to completion and its PNG
-  lands even if the client goes away; `model_options.cancellation.supported` is
-  `false` instead of pretending otherwise.
+* **Cancellation stops future work, not past writes.** A running job ends at its
+  next denoise-step boundary and writes no PNG; a waiter queued past the timeout
+  is refused before it starts. A disconnect cancels only that client's own jobs.
 * **No HTTP endpoint, by design.** The transport is a unix socket in the app home
   and the socket file *is* the lock, so there is no port to open and no second
   entry point that could load a second copy of the weights.

@@ -31,11 +31,48 @@ GitHub Release 上。Release 页面承载资产与简短公告，本文件是长
 
 ### 新增
 
-* **服务状态多了作业计数。** `status`（以及 `imagehive status`、`model_status`、
-  `doctor`）新增 `jobs_total` / `jobs_failed` / `uptime_seconds`：自启动以来完成
-  的模型作业数、其中失败数与进程存活秒数。参数校验拒绝（尺寸越界、类型错误、
-  未知命令）从不是作业，不计入；进模型阶段后失败（缺制品、加载失败、模型错误）
-  计入。旧守护进程没有这三个字段时，前端与 `doctor` 按原样显示，不报错。
+* **运行中的作业可以取消，断开的客户端不再让 GPU 空转。** 每个模型请求携带 token
+  （调用方可传，缺省由守护进程生成并随回复返回）；`cancel <token>` 中断运行中的
+  作业，MCP 侧 `notifications/cancelled` 同效（Ctrl-C 经前端 SIGINT 同链路）。
+  取消落在下一个 denoise-step 边界（上游步循环既有的 checkCancellation，不改上游
+  一行），不写 PNG，计入新的 `jobs_cancelled` 而非失败。客户端断开只取消它自己
+  的作业，别人的照常跑；排队中断开的 waiter 同计。排队超过
+  `queue_timeout_seconds`（默认 300s，`config.json` / `IMAGEHIVE_QUEUE_TIMEOUT_SECONDS`
+  可配）的等待者直接被拒，不再无限排队。`options.cancellation.supported=true`，
+  `status.current.token` 给出正在跑的 token。实测 2026-09-26（quality bf16）：
+  运行中取消 2s 内中断、无 PNG、`jobs_cancelled=1`；排队超时按配置秒数被拒；
+  断开后 1s 内计数。
+* **前端 stdin 关闭先等在途回复。** 此前 `printf | imagehive-mcp` 式单次调用在工具
+  线程回包前即退出（后台化 tools/call 的副作用），`imagehive options` 等空输出。
+  现在 EOF 时最多等 10 分钟排空在途调用，仍未完成才取消退出。
+
+### 变更
+
+* 作业计数移出 actor、加锁保护（`JobCounters`）：排队 waiter 的取消不再经 actor
+  队列记账——actor 正跑着 50 步生成时，取消计数也能立刻在 `status` 里看到。
+  `status`/`options`/`model_status`/`doctor` 读到的数字与此前一致，另见下条修复。
+* `imagehive generate --help` 取消文案：运行中 Ctrl-C 即取消（此前写"没有取消"）。
+
+### 修复
+
+* **前端后台化后的三处回归。** `cancelMine(self)` 调到了 Connection 自身的
+  token 版影子方法，owner 版（注册表那版）从未执行——断开取消静默失效；排队
+  waiter 循环只查超时不查取消，断开信号无人消费；stdin EOF 即退出杀死在途工具
+  线程。另 `swift package clean` 后 `swift build` 产物路径与 `.build/release`
+  软链的增量关系（见下）。
+* **增量构建缓存失效注意。** `swift build -c release` 有时不重编已改动的 target
+  （本次实测：改动后二进制时间戳不动），`make test-quick` 的 options 断言因此挂
+  在旧前端上。`touch` 源码无效，`swift package clean` 后重编恢复——但这会触发
+  MLX 全量重编（约 10 分钟），跑测试前留足时间。
+
+### 文档与测试
+
+* `Tests/smoke.sh` 新增 cancel/options 契约断言（无制品可跑）：未知 token、错类型
+  token、缺 token 的 cancel 均被拒且不计数；`options` 带 `cancellation.supported`
+  与 `queue_timeout_seconds`。`Tests/cli.sh` 的 doctor Jobs 断言扩到 cancelled。
+  取消/排队超时的 live 链路（bf16 真权重）见上条实测。
+* 此前已合入的作业计数（`jobs_total` / `jobs_failed` / `uptime_seconds`）属于同一
+  套计数器，本次一并移出 actor；另新增 `jobs_cancelled`，取消的作业不进失败数。
 
 ### 安全
 

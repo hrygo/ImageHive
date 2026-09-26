@@ -268,7 +268,7 @@ case "$doctor_text" in
   *) fail "doctor says nothing about the socket gate: $doctor_text" ;;
 esac
 case "$doctor_text" in
-  *"jobs "*) ok "$(printf '%s\n' "$doctor_text" | grep -o 'jobs [0-9]* failed [0-9]*')" ;;
+  *"jobs "*) ok "$(printf '%s\n' "$doctor_text" | grep -o 'jobs [0-9]* failed [0-9]* cancelled [0-9]*')" ;;
   *) fail "doctor does not report the job counters: $doctor_text" ;;
 esac
 

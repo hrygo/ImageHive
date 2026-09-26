@@ -376,6 +376,38 @@ echo "== the socket is owner-only, and status carries job counters"
   || fail "socket $IMAGEHIVE_SOCKET is not owner-only: $(stat -f%Lp "$IMAGEHIVE_SOCKET" 2>/dev/null)"
 echo "   socket is 0600"
 case "$status" in *jobs_total=0*jobs_failed=0*uptime_seconds=*) echo "   counters start at zero and uptime is reported" ;; *) fail "status is missing the job counters: $status";; esac
+# A cancel for a job that is not there answers no-such-job instead of killing
+# anything; a cancel whose token has the wrong type is refused like any other
+# mistyped key. Neither counts as a job. Options carries the cancellation
+# contract, so a client can stop discovering it by firing requests.
+python3 - "$IMAGEHIVE_SOCKET" <<'PYEOF' || fail "cancel/options contract did not hold up"
+import json, socket, sys
+def call(payload):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(sys.argv[1])
+    sock.sendall((json.dumps(payload) + "\n").encode())
+    buf = b""
+    while not buf.endswith(b"\n"):
+        buf += sock.recv(65536)
+    sock.close()
+    return json.loads(buf)
+before = call({"cmd": "status"})["status"]
+r = call({"cmd": "cancel", "token": "no-such-job"})
+assert r.get("ok") is False and "no such job" in r.get("error", ""), r
+r = call({"cmd": "cancel", "token": 7})
+assert r.get("ok") is False, r
+r = call({"cmd": "cancel"})
+assert r.get("ok") is False, r
+opts = call({"cmd": "options"})["options"]
+cancel = opts.get("cancellation", {})
+assert cancel.get("supported") is True, opts
+assert "cancel" in opts.get("commands", []), opts
+assert isinstance(cancel.get("queue_timeout_seconds"), (int, float)), opts
+after = call({"cmd": "status"})["status"]
+assert (after.get("jobs_total"), after.get("jobs_failed"), after.get("jobs_cancelled")) == \
+    (before.get("jobs_total"), before.get("jobs_failed"), before.get("jobs_cancelled")), (before, after)
+print("   unknown-token cancel, mistyped cancel, and the options contract; counters untouched")
+PYEOF
 # A job that fails past validation (no artifact here) counts as failed; a refusal
 # (a size the model cannot render) must not count as a job at all.
 # No weights are loaded here either way: without an artifact the 256px job fails

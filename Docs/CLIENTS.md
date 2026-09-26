@@ -117,6 +117,9 @@ Things an agent should know before it starts:
   the CLI, or the tool's `structuredContent`, carries the same fields.
 * **`model_status` answers while a generation is running**, and reports the live step
   (`current`). Use it to tell "busy" from "stuck".
-* **A request cannot be cancelled.** The daemon runs it to completion and writes the
-  PNG even if the client disconnects, so a batch that is killed mid-flight leaves
-  images behind that have to be accounted for.
+* **A request can be cancelled.** Every model call carries a token (pass one, or
+  read the generated one back from the reply); `notifications/cancelled` for the
+  MCP request id, or `cancel <token>` on the socket, ends the job at its next
+  denoise step — no PNG, counted as cancelled. A client that disconnects cancels
+  only its own jobs; other connections keep running. A waiter queued past
+  `queue_timeout_seconds` is refused before it starts.

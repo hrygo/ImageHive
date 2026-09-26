@@ -112,6 +112,11 @@ dup2(STDERR_FILENO, STDOUT_FILENO)
 struct ServiceConfig {
     var ttlSeconds: Double = 600
     var minWarmSeconds: Double = 60
+    /// How long a model request waits for its turn before it is refused. The
+    /// daemon serializes generations, so a second request queues behind the
+    /// first; without a ceiling a leaked client could wait out its whole
+    /// deadline in silence.
+    var queueTimeoutSeconds: Double = 300
     var fastArtifact = "SenseNova-U1.5-8B-MoT-8step-4bit"
     var qualityArtifact = "SenseNova-U1.5-8B-MoT-bf16"
     /// Write `<image>.png.json` next to every image; see the sidecar note in the
@@ -168,6 +173,7 @@ struct ServiceConfig {
 
         number("ttl_seconds") { config.ttlSeconds = $0 }
         number("min_warm_seconds") { config.minWarmSeconds = $0 }
+        number("queue_timeout_seconds") { config.queueTimeoutSeconds = $0 }
         text("fast_artifact") { config.fastArtifact = $0 }
         text("quality_artifact") { config.qualityArtifact = $0 }
         if let raw = object["write_sidecar"], !(raw is NSNull) {
@@ -191,6 +197,7 @@ let configURL = URL(fileURLWithPath: environmentForConfig["IMAGEHIVE_CONFIG"]
 let serviceConfig = ServiceConfig.load(from: configURL)
 let ttlSeconds = environmentForConfig["IMAGEHIVE_TTL_SECONDS"].flatMap(Double.init) ?? serviceConfig.ttlSeconds
 let minWarmSeconds = environmentForConfig["IMAGEHIVE_MIN_WARM_SECONDS"].flatMap(Double.init) ?? serviceConfig.minWarmSeconds
+let queueTimeoutSeconds = environmentForConfig["IMAGEHIVE_QUEUE_TIMEOUT_SECONDS"].flatMap(Double.init) ?? serviceConfig.queueTimeoutSeconds
 let fastArtifact = environmentForConfig["IMAGEHIVE_FAST_ARTIFACT"] ?? serviceConfig.fastArtifact
 let qualityArtifact = environmentForConfig["IMAGEHIVE_QUALITY_ARTIFACT"] ?? serviceConfig.qualityArtifact
 let socketPath = environmentForConfig["IMAGEHIVE_SOCKET"]
@@ -496,6 +503,35 @@ final class StatusBoard: @unchecked Sendable {
 
 let statusBoard = StatusBoard()
 
+/// Finished model jobs, split by outcome. Refusals that never reach the model
+/// (bad args, unknown cmd) are not jobs and do not count here — these numbers
+/// answer "how much work has this daemon done, and how much of it failed".
+/// Lives outside the actor behind a lock (like StatusBoard): a queued waiter
+/// cancelled while the actor is busy running a generation must still be counted
+/// now, not once the actor drains.
+final class JobCounters: @unchecked Sendable {
+    private let lock = NSLock()
+    private var total = 0
+    private var failed = 0
+    private var cancelled = 0
+
+    func noteFinished(failed: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        total += 1
+        if failed { self.failed += 1 }
+    }
+    func noteCancelled() {
+        lock.lock(); defer { lock.unlock() }
+        cancelled += 1
+    }
+    func snapshot() -> (total: Int, failed: Int, cancelled: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (total, failed, cancelled)
+    }
+}
+
+let jobCounters = JobCounters()
+
 /// When this process started, so `status` can report uptime without the actor.
 let bootedAt = Date()
 
@@ -512,15 +548,17 @@ final class JobProgress: @unchecked Sendable {
     /// is the only thing a client can read while the actor is busy.
     private let board: StatusBoard
     private var tool: String?
+    private var token: String?
     private var step = 0
     private var total = 0
     private var startedAt: Date?
 
     init(board: StatusBoard) { self.board = board }
 
-    func begin(_ tool: String, total: Int) {
+    func begin(_ tool: String, total: Int, token: String) {
         lock.lock(); defer { lock.unlock() }
         self.tool = tool
+        self.token = token
         self.step = 0
         self.total = total
         self.startedAt = Date()
@@ -535,6 +573,7 @@ final class JobProgress: @unchecked Sendable {
     func end() {
         lock.lock(); defer { lock.unlock() }
         tool = nil
+        token = nil
         step = 0
         total = 0
         startedAt = nil
@@ -554,6 +593,7 @@ final class JobProgress: @unchecked Sendable {
             "total": total,
             "elapsed_seconds": (Date().timeIntervalSince(startedAt) * 10).rounded() / 10,
         ]
+        if let token { out["token"] = token }
         if total > 0 { out["percent"] = Int((Double(step) / Double(total) * 100).rounded()) }
         return out
     }
@@ -572,7 +612,7 @@ func optionsReport() -> [String: Any] {
     return ["ok": true, "options": [
         "protocol": protocolVersion,
         "project_version": projectVersion,
-        "commands": ["generate", "edit", "vqa", "status", "options", "unload"],
+        "commands": ["generate", "edit", "vqa", "status", "options", "unload", "cancel"],
         "sizes": [
             "rule": "width and height must be multiples of 32 (pixelsPerToken = patchSize / downsampleRatio = 16 / 0.5)",
             "minimum": 32,
@@ -605,14 +645,19 @@ func optionsReport() -> [String: Any] {
             "edit": false,
             "note": "generate only: the edit surface has no unconditional branch, so edit_image rejects a non-empty negative instead of ignoring it",
         ],
+        "job_token": [
+            "note": "every model request carries a token (client-supplied, or generated) for cancel; the running job's token is in status.current.token",
+        ],
         "sidecar": [
             "enabled": sidecarEnabled,
             "path": "<image>.png.json",
             "fields": "prompt + sha256, negative, seed + whether it was pinned, width, height, steps, cfg, tier, artifact, seconds, peak memory, project version",
         ],
         "cancellation": [
-            "supported": false,
-            "note": "a dispatched request runs to completion and its PNG lands even if the client goes away; there is no cancel command",
+            "supported": true,
+            "cancel": ["cmd": "cancel", "token": "the token of a running job (status.current.token)"],
+            "queue_timeout_seconds": queueTimeoutSeconds,
+            "note": "a job ends at its next denoise-step boundary when cancelled or when its client disconnects; it writes no PNG and counts as cancelled, not failed. A waiter cancelled or disconnected while still queued counts as cancelled the same way. A job that waits longer than queue_timeout_seconds for its turn is refused before it starts.",
         ],
         "tiers": [
             "available": available,
@@ -753,12 +798,6 @@ actor Core {
     private var inflight = 0
     private var waiting = 0
     private var lastPeakMB = 0
-    /// Finished model jobs (generate/edit/vqa), split by outcome. Refusals that
-    /// never reach the model (bad args, unknown cmd) are not jobs and do not
-    /// count here — these two numbers answer "how much work has this daemon
-    /// done, and how much of it failed".
-    private var jobsTotal = 0
-    private var jobsFailed = 0
     /// Whether this process has initialized MLX (Metal) yet.
     ///
     /// MLX builds its Metal device on the *first* call, wherever that call comes
@@ -789,9 +828,11 @@ actor Core {
             "loads_total": loadsTotal,
             "inflight": inflight,
             "queue_depth": waiting,
-            "jobs_total": jobsTotal,
-            "jobs_failed": jobsFailed,
+            "jobs_total": jobCounters.snapshot().total,
+            "jobs_failed": jobCounters.snapshot().failed,
+            "jobs_cancelled": jobCounters.snapshot().cancelled,
             "uptime_seconds": Int(Date().timeIntervalSince(bootedAt)),
+            "queue_timeout_seconds": queueTimeoutSeconds,
             "ttl_seconds": ttlSeconds,
             "min_warm_seconds": minWarmSeconds,
             "last_peak_mb": lastPeakMB,
@@ -816,6 +857,7 @@ actor Core {
 
     /// In-actor view of the same state.
     func status() -> [String: Any] { publish() }
+
 
     private func release() {
         model = nil
@@ -916,6 +958,28 @@ actor Core {
         guard cmd == "generate" || cmd == "edit" || cmd == "vqa" else {
             return ["ok": false, "error": "unknown cmd '\(cmd)'"]
         }
+        // Every model job carries a token so it can be cancelled by name. The
+        // connection thread generated one when the request arrived (see
+        // Connection.start); a client-supplied `token` wins, but like every
+        // other key it is strictly typed — present-but-wrong is an error.
+        let token: String
+        do {
+            token = try stringArgStrict(request, "token") ?? UUID().uuidString
+        } catch {
+            return ["ok": false, "error": (error as NSError).localizedDescription]
+        }
+        // Second half of the queue-timeout gate. The connection thread only
+        // forwards when `inflight == 0`, but two waiters can both see zero and
+        // enter one after the other — the loser finds `inflight > 0` here and
+        // must re-check its own waiting time instead of queueing unboundedly
+        // behind the winner inside the actor.
+        if inflight > 0 {
+            let queuedAt = (request["queued_at"] as? NSNumber)?.doubleValue ?? Date().timeIntervalSince1970
+            let waited = Date().timeIntervalSince1970 - queuedAt
+            if waited > queueTimeoutSeconds {
+                return ["ok": false, "error": "queued \(Int(waited))s for a busy service (limit \(Int(queueTimeoutSeconds))s) — retry later"]
+            }
+        }
 
         // A malformed request is answered before anything is loaded, so a caller that
         // gets the JSON type wrong hears about it instead of silently receiving the
@@ -930,6 +994,8 @@ actor Core {
         }
         let tier = requestedTier
             ?? (cmd == "generate" && distilledFloor <= 12 ? "fast" : "quality")
+        var req = request
+        req["token"] = token
         waiting += 1
         inflight += 1
         lastUseAt = Date()
@@ -946,21 +1012,28 @@ actor Core {
         do {
             let out: [String: Any]
             switch cmd {
-            case "generate": out = try await generate(request, tier: tier)
-            case "edit": out = try await edit(request, tier: tier)
-            default: out = try await vqa(request, tier: tier)
+            case "generate": out = try await generate(req, tier: tier)
+            case "edit": out = try await edit(req, tier: tier)
+            default: out = try await vqa(req, tier: tier)
             }
-            jobsTotal += 1
+            jobCounters.noteFinished(failed: false)
             return out
         } catch {
+            // A cancelled job is neither a success nor a failure: it answers how
+            // much work was abandoned, not how much broke. `is CancellationError`
+            // is the check — NSError bridging of a cancellation carries no
+            // stable domain/code to match on.
+            if error is CancellationError {
+                jobCounters.noteCancelled()
+                return ["ok": false, "error": "cancelled", "cancelled": true, "token": token]
+            }
             // Validation refusals (RequestError.bad, before any load) are not jobs:
             // they never touched the model, so counting them would conflate "callers
             // sending bad args" with "the service failing". Everything past
             // validation — a missing artifact, a load failure, a model error — is.
             let ns = error as NSError
             if !(ns.domain == "imagehive" && ns.code == 1) {
-                jobsTotal += 1
-                jobsFailed += 1
+                jobCounters.noteFinished(failed: true)
             }
             // localizedDescription, not the NSError dump: this text is what the client
             // shows the user, and "Error Domain=... Code=1 UserInfo={...}" is not part
@@ -1004,7 +1077,7 @@ actor Core {
         p.seed = seed
         let (cond, uncond) = promptPair(tok, prompt, negative, cfg: p.cfgScale)
         let t0 = Date()
-        jobProgress.begin("generate", total: p.numSteps)
+        jobProgress.begin("generate", total: p.numSteps, token: (request["token"] as? String) ?? "untracked")
         defer { jobProgress.end() }
         let image = try m.t2iGenerate(
             condIds: cond, uncondIds: uncond, width: width, height: height, params: p,
@@ -1109,7 +1182,7 @@ actor Core {
         let condIds = try tok.encode(Conversation.editCondPrompt(prompt, imageTokenCounts: counts))
         let imgCondIds = try tok.encode(Conversation.editImgCondPrompt(imageTokenCounts: counts))
         let t0 = Date()
-        jobProgress.begin("edit", total: p.numSteps)
+        jobProgress.begin("edit", total: p.numSteps, token: (request["token"] as? String) ?? "untracked")
         defer { jobProgress.end() }
         let image = try m.it2iGenerate(
             condIds: condIds, imgCondIds: imgCondIds, uncondIds: nil, images: images,
@@ -1352,15 +1425,101 @@ sweeper.start()
 
 /// One client connection: a blocking read loop on its own thread, responses
 /// written back through a serial queue so ordering stays intact.
+/// Whether a socket request names a model job (generate/edit/vqa). Only those
+/// get a cancellation token and a tracked Task; status/options/unload/cancel
+/// answer immediately and are never worth cancelling.
+func isCancellable(_ request: [String: Any]) -> Bool {
+    let cmd = (request["cmd"] as? String) ?? ""
+    return cmd == "generate" || cmd == "edit" || cmd == "vqa"
+}
+
+/// Process-wide table of outstanding model jobs, keyed by token. It lives
+/// outside any Connection because a `cancel` arrives on a different connection
+/// from the job it stops — the caller learns the token from
+/// `status.current.token`, which no single connection owns. Guarded by a serial
+/// queue because entries are added/removed inside Tasks (async contexts, where
+/// NSLock is unavailable under Swift 6 sendability rules).
+final class JobRegistry: @unchecked Sendable {
+    static let shared = JobRegistry()
+    private let queue = DispatchQueue(label: "imagehive.registry")
+    private var tasks: [String: Task<Void, Never>] = [:]
+
+    /// Which connection started each job, so a disconnect cancels only its own
+    /// jobs — other connections' generations keep running.
+    private var owners: [String: ObjectIdentifier] = [:]
+
+    func add(_ token: String, _ task: Task<Void, Never>, owner: Connection) {
+        queue.sync {
+            tasks[token] = task
+            owners[token] = ObjectIdentifier(owner)
+        }
+    }
+    func remove(_ token: String) {
+        queue.sync {
+            tasks.removeValue(forKey: token)
+            owners.removeValue(forKey: token)
+        }
+    }
+    func cancel(_ token: String) -> Bool {
+        var task: Task<Void, Never>?
+        queue.sync { task = tasks[token] }
+        guard let task else { return false }
+        task.cancel()
+        return true
+    }
+    func cancelMine(_ owner: Connection) {
+        let id = ObjectIdentifier(owner)
+        var mine: [Task<Void, Never>] = []
+        queue.sync {
+            for (token, ownerId) in owners where ownerId == id {
+                if let task = tasks[token] { mine.append(task) }
+                tasks.removeValue(forKey: token)
+                owners.removeValue(forKey: token)
+            }
+        }
+        for task in mine { task.cancel() }
+    }
+}
+
 final class Connection {
     private let fd: Int32
     private let writeQueue = DispatchQueue(label: "imagehive.write")
     private let core: Core
+    /// One entry per model request still outstanding on this connection, keyed
+    /// by its token. Cancelling a finished Task is a no-op, so entries are
+    /// removed when the answer goes out — not when the Task ends — which also
+    /// keeps a late `cancel` for a finished job answering "no such job".
+    /// Serial queue guarding the process-wide task table below: registry
+    /// access happens inside Tasks (async contexts), where `NSLock.lock()` is
+    /// unavailable under Swift 6 sendability rules, so a queue owns the table.
+    private let registry = JobRegistry.shared
 
     init(fd: Int32, core: Core) {
         self.fd = fd
         self.core = core
     }
+
+    /// Interrupt the job named by `token`, if it is still outstanding on this
+    /// connection. Synchronous: the Task is cancelled here, on the connection
+    /// thread, without entering the actor queue behind the job it stops. The
+    /// model loops check cancellation every denoise step (CAN cadence), so the
+    /// job ends at the next step boundary; the queued Task then answers
+    /// `{"ok":false,"error":"cancelled","cancelled":true}` to whoever is still
+    /// listening — or to nobody, if the client already went away.
+    func cancel(token: String) -> [String: Any] {
+        guard registry.cancel(token) else {
+            return ["ok": false, "error": "no such job '\(token)'"]
+        }
+        return ["ok": true, "cancelled": token]
+    }
+
+    /// The client went away: stop everything IT started. A batch client that is
+    /// killed mid-run used to leave its generations burning GPU time to write
+    /// PNGs nobody would read; now the jobs end at their next step boundary.
+    /// Only this connection's tokens are cancelled — other connections' jobs
+    /// keep running. (A connection that never sent a model job cancels nothing.)
+    /// Quick (read-only) Tasks are tracked too, but they finish instantly, so
+    /// cancelling them is a harmless no-op.
 
     /// One line, then close. Used to refuse a connection instead of dropping it: the
     /// protocol is one JSON object per line and a caller that gets nothing waits out its
@@ -1376,8 +1535,9 @@ final class Connection {
     func start(onFinish: @escaping () -> Void) {
         // Borrowed into locals so the closures below need no implicit `self`.
         let fd = self.fd
-        let core = self.core
         let writeQueue = self.writeQueue
+        // `me` (below) carries the registry and the actor; the fd/queue locals
+        // keep the hot path free of retain cycles that matter.
         let thread = Thread {
             // One JSON object per line, and the answer is written in the same shape.
             func send(_ data: Data) {
@@ -1426,23 +1586,115 @@ final class Connection {
                         sendError("empty request — send one JSON object per line")
                         continue
                     }
-                    Task {
-                        let request = ((try? JSONSerialization.jsonObject(with: line)) as? [String: Any]) ?? [:]
+                    let parsed = ((try? JSONSerialization.jsonObject(with: line)) as? [String: Any]) ?? [:]
+                    // `cancel` is answered here, on the connection thread: it must
+                    // not enter the actor queue behind the very job it stops.
+                    if (parsed["cmd"] as? String) == "cancel" {
+                        guard let token = parsed["token"] as? String, !token.isEmpty else {
+                            sendError("cancel needs a token — the token of a running job is in status.current.token")
+                            continue
+                        }
+                        let response = self.cancel(token: token)
+                        guard let data = try? JSONSerialization.data(withJSONObject: response) else { continue }
+                        send(data)
+                        continue
+                    }
+                    // Model jobs carry a token from here on: generated now (so a
+                    // `cancel` arriving while the job queues already finds it),
+                    // pinned into the request the actor sees (see handle).
+                    var request = parsed
+                    // A client-supplied token wins; a present-but-wrong-typed one
+                    // is left alone for handle to refuse (strict keys, hard
+                    // constraint 9) instead of being silently replaced here.
+                    let token: String? = if !isCancellable(request) { nil }
+                        else if let t = request["token"] as? String { t }
+                        else if request["token"] == nil { UUID().uuidString }
+                        else { nil }
+                    if let token { request["token"] = token }
+                    // Strong reference for the Task's lifetime: a job can outlive
+                    // its connection (disconnect cancels it, but cancellation
+                    // lands at the next step boundary), so the registry must
+                    // stay valid until the Task removes itself.
+                    let me = self
+                    let task: Task<Void, Never> = Task {
                         // `status`, `options` and a busy `unload` are answered here, on
                         // the connection thread: during a generation the actor is held by
                         // the model call and would not reply until it finished (see
                         // StatusBoard). Everything that needs the model goes through it.
-                        let response: [String: Any]
+                        //
+                        // Model jobs wait for their turn here, outside the actor, so a
+                        // queue that never drains refuses instead of holding the caller
+                        // past its deadline. The actor re-checks on entry (see handle):
+                        // two waiters can both see an idle service and enter one after
+                        // the other.
+                        if let token {
+                            request["queued_at"] = Date().timeIntervalSince1970
+                            let queuedAt = Date()
+                            // The wait can outlive the client: a caller that sent a
+                            // job and hung up while queuing must not start burning
+                            // GPU time after it left, so the loop polls for the
+                            // disconnect (or cancel) alongside the timeout. Either
+                            // way the waiter asked for work that never ran — count
+                            // it as cancelled, not silent.
+                            var queuedOutcome: String = "turn"
+                            while statusBoard.snapshot()["inflight"] as? Int ?? 0 > 0 {
+                                if Task.isCancelled {
+                                    queuedOutcome = "cancelled"
+                                    break
+                                }
+                                if Date().timeIntervalSince(queuedAt) > queueTimeoutSeconds {
+                                    queuedOutcome = "timeout"
+                                    break
+                                }
+                                try? await Task.sleep(nanoseconds: 200_000_000)
+                            }
+                            if queuedOutcome == "cancelled" {
+                                me.registry.remove(token)
+                                jobCounters.noteCancelled()
+                                // The actor may be busy running a generation; publish
+                                // from the last snapshot so `status` shows the count
+                                // now instead of once the actor drains.
+                                var snap = statusBoard.snapshot()
+                                let counts = jobCounters.snapshot()
+                                snap["jobs_total"] = counts.total
+                                snap["jobs_failed"] = counts.failed
+                                snap["jobs_cancelled"] = counts.cancelled
+                                statusBoard.publish(snap)
+                                return
+                            }
+                            if queuedOutcome == "timeout" {
+                                me.registry.remove(token)
+                                sendError("queued \(Int(Date().timeIntervalSince(queuedAt)))s for a busy service " +
+                                    "(limit \(Int(queueTimeoutSeconds))s) — retry later")
+                                return
+                            }
+                        }
                         if let quick = immediateAnswer(request) {
-                            response = quick
-                        } else {
-                            response = await core.handle(request)
+                            if let token {
+                                me.registry.remove(token)
+                            }
+                            guard let data = try? JSONSerialization.data(withJSONObject: quick) else { return }
+                            send(data)
+                            return
+                        }
+                        let response = await me.core.handle(request)
+                        if let token {
+                            me.registry.remove(token)
                         }
                         guard let data = try? JSONSerialization.data(withJSONObject: response) else { return }
                         send(data)
                     }
+                    if let token {
+                        // A cancel (or a disconnect) that landed between Task
+                        // creation and registration: honour it now rather than
+                        // running a job nobody wants.
+                        let alreadyCancelled = task.isCancelled
+                        me.registry.add(token, task, owner: me)
+                        if alreadyCancelled { task.cancel() }
+                    }
                 }
             }
+            JobRegistry.shared.cancelMine(self)
             close(fd)
             onFinish()
         }

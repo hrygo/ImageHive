@@ -361,6 +361,32 @@ final class DaemonClient {
         return cmd == "vqa" || ["status", "options", "unload"].contains(cmd)
     }
 
+    /// Fire a `cancel` at the daemon on a throwaway connection. Never uses the
+    /// serial `call` path: the connection that runs the job is blocked inside
+    /// `roundTrip` until the job ends, so routing cancel through the same lock
+    /// would delay it until there is nothing left to stop. Best effort — a
+    /// failed cancel is logged, and the caller already stopped waiting.
+    func cancel(token: String) {
+        let raw = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard raw >= 0 else { return }
+        defer { close(raw) }
+        guard withSockaddr(socketPath, { connect(raw, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }) == 0 else { return }
+        guard let body = try? JSONSerialization.data(
+            withJSONObject: ["cmd": "cancel", "token": token] as [String: Any]) else { return }
+        var out = body
+        out.append(0x0A)
+        _ = writeAll(raw, out)
+        // The reply names the outcome, but nobody is waiting for it: drain one
+        // line so the daemon never blocks on a full socket buffer, then leave.
+        var buf = Data()
+        var byte = [UInt8](repeating: 0, count: 1)
+        while !buf.contains(0x0A) {
+            let n = read(raw, &byte, 1)
+            if n <= 0 { break }
+            buf.append(contentsOf: byte[0..<n])
+        }
+    }
+
     func call(_ payload: [String: Any]) throws -> [String: Any] {
         lock.lock()
         defer { lock.unlock() }
@@ -587,7 +613,7 @@ let toolCatalogue: [[String: Any]] = [
     {
       "name": "model_options",
       "title": "What the image model accepts",
-      "description": "Report what this service accepts before anything is asked of it: the sizes it can render (multiples of 32, with recommended 1:1, 3:2 and 16:9 values), the steps and cfg ranges with their per-tier defaults, that the seed is reproducible, that a negative prompt applies to generate_image but not to edit_image, where the sidecar metadata lands, which tiers are installed here, and that a dispatched request cannot be cancelled. Read-only, and it answers immediately even while another generation is running.",
+      "description": "Report what this service accepts before anything is asked of it: the sizes it can render (multiples of 32, with recommended 1:1, 3:2 and 16:9 values), the steps and cfg ranges with their per-tier defaults, that the seed is reproducible, that a negative prompt applies to generate_image but not to edit_image, where the sidecar metadata lands, which tiers are installed here, and that a dispatched request can be cancelled (notifications/cancelled) or refused after the queue timeout. Read-only, and it answers immediately even while another generation is running.",
       "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
       "annotations": {"title": "What the image model accepts", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     }
@@ -596,7 +622,7 @@ let toolCatalogue: [[String: Any]] = [
     {
       "name": "model_status",
       "title": "Image model status",
-      "description": "Report the state of the shared local image service: which weights are resident, how many times they have been loaded since boot, how many model jobs finished and failed since boot, how many generations are queued or in flight, uptime, the idle-unload TTL, and the peak memory of the last job. Use it to decide whether a call will pay a model load, or to confirm that no duplicate copy is resident.",
+      "description": "Report the state of the shared local image service: which weights are resident, how many times they have been loaded since boot, how many model jobs finished, failed and were cancelled since boot, how many generations are queued or in flight (with the running job token for cancel), uptime, the idle-unload TTL, and the peak memory of the last job. Use it to decide whether a call will pay a model load, or to confirm that no duplicate copy is resident.",
       "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
       "annotations": {"title": "Image model status", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
     }
@@ -699,8 +725,8 @@ func inlineImageBlock(_ path: String) -> [String: Any]? {
     return ["type": "image", "data": data.base64EncodedString(), "mimeType": "image/png"]
 }
 
-func runTool(_ name: String, _ arguments: [String: Any]) -> [String: Any] {
-    var payload: [String: Any]
+func runTool(_ name: String, _ arguments: [String: Any], token: String) -> [String: Any] {
+    var payload: [String: Any] = [:]
     var inlineThumbnail = false
 
     switch name {
@@ -752,6 +778,12 @@ func runTool(_ name: String, _ arguments: [String: Any]) -> [String: Any] {
     default:
         return failure("unknown tool '\(name)'", tool: "")
     }
+    // The token the daemon cancels by. Stamped here — not before the switch —
+    // because every branch above rebuilds `payload` from scratch. A
+    // client-supplied `token` wins (a batch client may name its jobs);
+    // otherwise the MCP request id, which is what a later
+    // notifications/cancelled will name. Read-only commands ignore it.
+    payload["token"] = arguments["token"] as? String ?? token
 
     let response: [String: Any]
     do {
@@ -792,7 +824,7 @@ func runTool(_ name: String, _ arguments: [String: Any]) -> [String: Any] {
         negative: generate_image only; edit_image rejects it
         sidecar: \((sidecar["enabled"] as? Bool) == true ? "on" : "off") — <image>.png.json (prompt + sha256, seed, size, steps, cfg, tier, artifact, seconds)
         tiers: available=\(available.isEmpty ? "none" : available) resident=\((tiers["resident"] as? String) ?? "cold")
-        cancel: not supported — a dispatched request finishes and writes its PNG even if the client disconnects
+        cancel: supported — send notifications/cancelled for the request id, or cancel <token>; a cancelled job writes no PNG and counts as cancelled, not failed. Queued past the timeout the daemon refuses instead of hanging.
         output_dir: \((options["output_dir"] as? String) ?? "?")
         """))
         result["content"] = content
@@ -856,6 +888,12 @@ func serverInfo() -> [String: Any] {
 /// false` means), and abandoning the session is what a client that closed its end
 /// asked for. A `FileHandle` write here used to abort the process instead, which is
 /// how a client restart turns into a crash report.
+/// Serializes stdout writes: tool calls run on background threads (so the
+/// stdio loop keeps reading cancellations), and two replies must never
+/// interleave mid-line. The line protocol needs whole lines, not ordering —
+/// MCP pairs responses by id.
+let writeLock = NSLock()
+
 func writeMessage(_ object: [String: Any]) {
     guard let data = try? JSONSerialization.data(withJSONObject: object) else {
         log("could not serialize a response")
@@ -863,6 +901,9 @@ func writeMessage(_ object: [String: Any]) {
     }
     var out = data
     out.append(0x0A)
+    // NSLock is fine here: every holder runs on a plain thread, never in an
+    // async context (this target is Swift 5 mode, no Swift 6 sendability gate).
+    writeLock.lock(); defer { writeLock.unlock() }
     if !writeAll(STDOUT_FILENO, out) {
         log("client closed stdout — exiting")
         exit(0)
@@ -879,6 +920,34 @@ func replyError(id: Any, code: Int, _ message: String) {
     writeMessage(["jsonrpc": "2.0", "id": id, "error": ["code": code, "message": message]])
 }
 
+/// tools/call ids still running, mapped to the daemon job token that stops
+/// them. Guarded by a lock: the stdio loop writes, background tool threads
+/// delete, and a cancelled notification reads — all on different threads.
+let inflightLock = NSLock()
+var inflightTokens: [String: String] = [:]
+
+/// Set by the SIGINT/SIGTERM handler below; the stdio loop polls it after every
+/// read. A signal handler may not allocate (no JSON, no strings), so it only
+/// raises this flag and the loop does the cancelling with the normal path.
+var terminationRequested = sig_atomic_t(0)
+
+/// Cancel every job this front end started, then leave. Shared by the stdin
+/// shutdown path and the signal path: either way the client is gone and the
+/// daemon should count the jobs as cancelled, not run them to completion.
+func cancelInflightAndExit(_ code: Int32) -> Never {
+    var orphaned: [String] = []
+    inflightLock.lock()
+    orphaned = Array(inflightTokens.values)
+    inflightTokens.removeAll()
+    inflightLock.unlock()
+    for token in orphaned { daemon.cancel(token: token) }
+    log("cancelled \(orphaned.count) inflight job(s), exiting")
+    exit(code)
+}
+
+/// MCP request ids are numbers or strings; daemon tokens are strings.
+func idKey(_ id: Any) -> String { String(describing: id) }
+
 func handle(_ message: [String: Any]) {
     let method = message["method"] as? String ?? ""
     let params = (message["params"] as? [String: Any]) ?? [:]
@@ -886,8 +955,24 @@ func handle(_ message: [String: Any]) {
     // Notifications carry no id and never get a response.
     guard let id = message["id"] else {
         switch method {
-        case "notifications/initialized", "notifications/cancelled", "notifications/progress",
+        case "notifications/initialized", "notifications/progress",
              "notifications/roots/list_changed":
+            return
+        case "notifications/cancelled":
+            // MCP 2025-11-25 §5.4 / 2026-07-28: params.requestId names the
+            // tools/call to stop. The daemon job dies at its next step
+            // boundary; the background thread's reply then carries the
+            // cancellation instead of an image.
+            if let rid = params["requestId"] {
+                var token: String?
+                inflightLock.lock()
+                token = inflightTokens.removeValue(forKey: idKey(rid))
+                inflightLock.unlock()
+                if let token {
+                    daemon.cancel(token: token)
+                    log("cancelled \(idKey(rid)) (job \(token))")
+                }
+            }
             return
         default:
             log("ignoring notification \(method)")
@@ -936,7 +1021,23 @@ func handle(_ message: [String: Any]) {
             return
         }
         let arguments = (params["arguments"] as? [String: Any]) ?? [:]
-        reply(id: id, runTool(name, arguments))
+        // Off the stdio thread: a generation blocks for a minute, and the loop
+        // must keep reading — otherwise a notifications/cancelled for this very
+        // call sits unread in the pipe until the job finishes on its own. MCP
+        // pairs responses by id, so out-of-order replies are fine. Threads, not
+        // Tasks: this file is synchronous top-to-bottom (read/write on fds).
+        let key = idKey(id)
+        let token = arguments["token"] as? String ?? "mcp-\(key)"
+        inflightLock.lock()
+        inflightTokens[key] = token
+        inflightLock.unlock()
+        Thread {
+            let result = runTool(name, arguments, token: token)
+            inflightLock.lock()
+            inflightTokens.removeValue(forKey: key)
+            inflightLock.unlock()
+            reply(id: id, result)
+        }.start()
 
     case "prompts/list":
         reply(id: id, ["prompts": []] as [String: Any])
@@ -954,6 +1055,14 @@ func handle(_ message: [String: Any]) {
 
 // MARK: - stdio loop
 
+// Ctrl-C on `imagehive generate`, or a client that signals us instead of closing
+// stdin: stop the jobs we started before leaving, or they burn GPU time writing
+// PNGs nobody will read. The handler only raises the flag (see
+// terminationRequested); the loop below does the work.
+for sig in [SIGINT, SIGTERM] {
+    signal(sig) { _ in terminationRequested = 1 }
+}
+
 log("ready (socket \(socketPath))")
 
 var stdinBuffer = Data()
@@ -962,7 +1071,11 @@ while true {
     let n = read(0, &chunk, chunk.count)
     // The same rule as everywhere else this program reads: a signal that interrupts the
     // read is not the client leaving. Exiting here ends an MCP session that is fine.
-    if n < 0 && errno == EINTR { continue }
+    // ...unless it is the shutdown we asked for: then cancel first (see above).
+    if n < 0 && errno == EINTR {
+        if terminationRequested != 0 { cancelInflightAndExit(0) }
+        continue
+    }
     if n <= 0 { break }
     stdinBuffer.append(contentsOf: chunk[0..<n])
     while let newline = stdinBuffer.firstIndex(of: 0x0A) {
@@ -979,4 +1092,18 @@ while true {
         handle(message)
     }
 }
-log("stdin closed, exiting")
+// The client is gone. A one-shot pipe (`printf ... | imagehive-mcp`) closes stdin
+// while tool threads are still working — wait for their replies first, or the
+// caller gets nothing. Only jobs still running after that are cancelled: their
+// owner is gone and nobody will read their PNGs. The daemon counts them as
+// cancelled.
+if terminationRequested == 0 {
+    for _ in 0..<6000 {
+        inflightLock.lock()
+        let n = inflightTokens.count
+        inflightLock.unlock()
+        if n == 0 { break }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+}
+cancelInflightAndExit(0)
