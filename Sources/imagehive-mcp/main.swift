@@ -448,6 +448,12 @@ func runManagementSwitch(_ flag: String) {
         print("inflight=\(inflight)")
         print("queue_depth=\(queued)")
         print("ttl_seconds=\(Int(ttl))")
+        if let cacheTtl = status["cache_ttl_seconds"] as? Double {
+            print("cache_ttl_seconds=\(Int(cacheTtl))")
+        }
+        if let swept = status["last_cache_sweep_at"] as? String {
+            print("last_cache_sweep_at=\(swept)")
+        }
         print("last_peak_mb=\(peak)")
         if let jobsTotal { print("jobs_total=\(jobsTotal)") }
         if let jobsFailed { print("jobs_failed=\(jobsFailed)") }
@@ -848,7 +854,7 @@ func runTool(_ name: String, _ arguments: [String: Any], token: String) -> [Stri
         resident_tier=\(resident) available_tiers=\(installed.isEmpty ? "none" : installed) \
         loads_total=\(loads) inflight=\(inflight) queue_depth=\(queued) \
         jobs_total=\(jobsTotal) jobs_failed=\(jobsFailed) uptime_seconds=\(uptime) \
-        ttl_seconds=\(ttl) last_peak_mb=\(peak)
+        ttl_seconds=\(ttl) cache_ttl_seconds=\(intValue(status["cache_ttl_seconds"]) ?? 0) last_peak_mb=\(peak)
         \(status["current"] == nil ? "" : "current=" + ((status["current"] as? [String: Any]).map { current in
             "\(current["tool"] as? String ?? "job") step \(intValue(current["step"]) ?? 0)/\(intValue(current["total"]) ?? 0) \(intValue(current["percent"]) ?? 0)% elapsed \(doubleValue(current["elapsed_seconds"]) ?? 0)s"
         } ?? ""))

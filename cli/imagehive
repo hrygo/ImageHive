@@ -83,7 +83,7 @@ help_config() {
   say "  config set KEY=VALUE ...  change one (IMAGEHIVE_MODELS, IMAGEHIVE_OUT, ...)"
   say ""
   say "  Daemon knobs live in $(ih_config): ttl_seconds, min_warm_seconds,"
-  say "  fast_artifact, quality_artifact, write_sidecar. Restart after changing either."
+  say "  cache_ttl_seconds, fast_artifact, quality_artifact, write_sidecar. Restart after changing either."
 }
 
 help_logs() {
