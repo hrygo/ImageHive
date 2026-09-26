@@ -27,7 +27,7 @@
 GitHub Release 上。Release 页面承载资产与简短公告，本文件是长期记录。具体命令见
 [Docs/DISTRIBUTING.zh-CN.md](Docs/DISTRIBUTING.zh-CN.md)。
 
-## [Unreleased]
+## [0.6.4] - 2026-09-27
 
 ### 新增
 
@@ -581,7 +581,9 @@ socket 文件名、发行归档名。这是破坏性变更——写进 shell pro
 * 配置迁到 `$IMAGEHIVE_HOME/config.json`（档位路径、TTL）与 `$IMAGEHIVE_HOME/service.conf`
   （安装布局）；环境变量仍然优先。
 
-[未发布]: https://github.com/hrygo/ImageHive/compare/v0.6.1...HEAD
+[未发布]: https://github.com/hrygo/ImageHive/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/hrygo/ImageHive/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/hrygo/ImageHive/releases/tag/v0.6.3
 [0.6.1]: https://github.com/hrygo/ImageHive/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/hrygo/ImageHive/releases/tag/v0.6.0
 [0.5.2]: https://github.com/hrygo/ImageHive/compare/v0.5.0...v0.5.2
