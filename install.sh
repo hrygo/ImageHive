@@ -782,14 +782,14 @@ for line in sys.stdin:
 
   if [ "$DO_SMOKE_GENERATE" = "1" ]; then
     say ""
-    say "generating a test image (this also proves the weights load)…"
+    say "正在生成一张测试图（顺便证明权重能加载）…"
     # No --tier: the CLI picks whichever artifact this machine has installed.
     "$(ih_cli_path)" generate --prompt "a small brass compass on a dark wooden desk, soft light"
   fi
 }
 
 summary() {
-  step "done"
+  step "完成"
   say "  service   $(ih_label)   ($(ih_daemon))"
   say "  command   $(ih_cli_path)"
   say "  home      $(ih_home)"
@@ -802,9 +802,9 @@ summary() {
   # report a different (or missing) service afterwards.
   if [ "$(ih_home)" != "$IH_DEFAULT_HOME" ] || [ "$(ih_prefix)" != "$IH_DEFAULT_PREFIX" ]; then
     say ""
-    say "Note: this install is not in the default location, so a new shell needs the"
-    say "      layout in its environment before imagehive finds it (the MCP entries"
-    say "      written for the clients already carry it):"
+    say "注意：这次装在了非默认位置，新开的 shell 需要先声明布局，imagehive 才找得到"
+    say "      （已写入各客户端的 MCP 条目自带这些变量，不用管）： "
+    say ""
     # Plain `if`s, not `[ … ] && …`: with `set -e` a false test as the last command of
     # the block would end the install here.
     if [ "$(ih_home)" != "$IH_DEFAULT_HOME" ]; then
@@ -816,32 +816,32 @@ summary() {
   fi
   if [ -d "$OLD_LAYOUT_HOME/bin" ] && [ "$DRY_RUN" = "0" ]; then
     say ""
-    say "Note: $OLD_LAYOUT_HOME keeps compatibility wrappers for MCP clients wired"
-    say "      before this change. Restart those clients, then delete that directory."
+    say "注意：$OLD_LAYOUT_HOME 里是给老客户端留的兼容壳，"
+    say "      重启那些客户端之后就可以删掉这个目录。"
   fi
   say ""
-  say "Next:"
-  say "  imagehive doctor        check every moving part"
-  say "  imagehive models        see which artifacts are installed"
-  say "  imagehive clients list  see which clients are wired"
+  say "接下来："
+  say "  imagehive doctor        检查每个环节"
+  say "  imagehive models        看装了哪些权重"
+  say "  imagehive clients list  看接了哪些客户端"
   # The command is installed into ~/.local/bin, which is not on PATH by default
   # on macOS. Say so here rather than letting the next command fail with
   # "command not found".
   case ":$PATH:" in
     *":$(ih_prefix)/bin:"*) ;;
     *) say ""
-       say "Note: $(ih_prefix)/bin is not on your PATH, so type the whole path:"
+       say "注意：$(ih_prefix)/bin 不在 PATH 里，直接敲全路径："
        say "      $(ih_cli_path) doctor"
-       say "      or add this to ~/.zprofile:  export PATH=\"$(ih_prefix)/bin:\$PATH\"" ;;
+       say "      或者加进 ~/.zprofile：  export PATH=\"$(ih_prefix)/bin:\$PATH\"" ;;
   esac
   say ""
-  say "Then restart your agent (Codex, Claude, opencode, QwenPaw, …) so it picks"
-  say "up the new MCP entry, and ask it for an image. The first call loads the"
-  say "weights (~5 s); they are released again after 10 minutes idle."
+  say "然后重启你的智能体（Codex、Claude、opencode、QwenPaw……），让它读到新的 MCP 条目，"
+  say "再让它画一张图。第一次调用会加载权重（约 5 秒）；"
+  say "空闲 2 分钟先清缓存、10 分钟再卸载，不会一直占着内存。"
 }
 
 main() {
-  say "${IH_BOLD}imagehive${IH_RESET} — resident local image service for MCP agents, installer $IH_VERSION"
+  say "${IH_BOLD}imagehive${IH_RESET} —— MCP 智能体的本机常驻生图服务，安装器 $IH_VERSION"
   [ "$DRY_RUN" = "1" ] && warn "dry run: nothing will be changed"
   preflight
   migrate_brand_home

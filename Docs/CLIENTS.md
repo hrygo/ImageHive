@@ -117,6 +117,12 @@ Things an agent should know before it starts:
   the CLI, or the tool's `structuredContent`, carries the same fields.
 * **`model_status` answers while a generation is running**, and reports the live step
   (`current`). Use it to tell "busy" from "stuck".
+* **One call can draw several images.** `generate_image` takes `count` (1...8):
+  the daemon draws them serially with seeds N, N+1, ... and the reply carries
+  every path plus a `structuredContent` of `{images, count, requested}`. One
+  `notifications/cancelled` stops the whole batch; images already written are
+  kept and reported, and the reply is `isError` so a partial batch is never
+  mistaken for a full one.
 * **A request can be cancelled.** Every model call carries a token (pass one, or
   read the generated one back from the reply); `notifications/cancelled` for the
   MCP request id, or `cancel <token>` on the socket, ends the job at its next

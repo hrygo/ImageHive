@@ -31,6 +31,16 @@ GitHub Release 上。Release 页面承载资产与简短公告，本文件是长
 
 ### 新增
 
+* **一次调用连画几张（MCP `count`）。** `generate_image` 新增 `count`（1–8）：
+  daemon 串行画完，seed 走 N、N+1……，回复逐张列路径，
+  `structuredContent` 为 `{images, count, requested}`。一句
+  `notifications/cancelled` 停掉整批，已写完的图保留并如实报告，回复为
+  `isError`（部分批次永不被当成整批）。实测 2026-09-26（quality bf16）：
+  count=2 得 seeds 700/701、2 PNG+2 sidecar；count=9 被拒；批量中取消落在
+  第 2 张时保留第 1 张。另修复取消与 stdin-EOF 等待的竞态：cancel 把 key 清空
+  会让 EOF 等待误判"排空"而杀死正在回部分批次的线程，现在 key 保留到线程回包。
+* **安装器收尾说中文。** `summary` 与冒烟提示改为中文（错误文本保留英文，排障
+  与测试断言对得上）；收尾顺手把两档回收写进去了（2 分钟清缓存、10 分钟卸载）。
 * **空闲回收分两档，burst 间歇不再白占内存。** `tick()` 里 idle 过
   `cache_ttl_seconds`（默认 120s，可配，`IMAGEHIVE_CACHE_TTL_SECONDS`）只清 MLX
   缓存、权重保持常驻——连画几张后的冷却期还回中间张量与 buffer 池，下张图零
@@ -43,6 +53,15 @@ GitHub Release 上。Release 页面承载资产与简短公告，本文件是长
 
 ### 文档与测试
 
+* `Tests/smoke.sh` 断言 `generate_image` schema 含 `count` 1–8 且 `count=9`
+  被拒（无制品可跑）；live 批量/取消链路见上条实测。`Docs/CLIENTS.md` 新增批量
+  一节，两份 README 的批量段落更新（此前仍写"无法取消"）。
+* 批量入口的严格性补洞（硬约束 9/13）：`count`/`seed` 改走 `strictRequestInt`
+  ——`"count": "2"` 这类错类型键现在被拒而不是静默接受；`seed + i` 在
+  `Int.max` 附近会 trap，批量前先算好 `seed <= Int.max - (count-1)` 再画；
+  对不存在的 requestId 发 cancelled 不再留幽灵 key（否则 stdin-EOF 等待把它
+  当"还没跑完" hang 满 10 分钟）；批量也 honours `inline_thumbnail`。实测
+  2026-09-27：三条拒绝 + daemon 存活 + 批量/取消主链路重跑全过。
 * `Tests/smoke.sh` 断言 `options.idle_reclamation` 与 `status` 的
   `cache_ttl_seconds`（无制品可跑）；live sweep/TTL 链路见上条实测。
 

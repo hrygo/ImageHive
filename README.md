@@ -246,9 +246,12 @@ imagehive generate --prompt "一盏黄铜台灯" --seed 42 --n 4 --out ~/eval/ru
 可读的形式打出来（`--n > 1` 时是数组），`--out` 把图片和它的 sidecar 一起搬走，
 `imagehive generate --help` 列全部参数。
 
-批量跑之前需要知道的一件事：**已经派发的请求无法取消**。杀掉命令不会停止生成，图片
-照样落盘（详见 [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md)）。要做干净计数的
-评测，请等每一条返回再发下一条。
+批量跑有两种走法：CLI 的 `--n 4`（seed 依次走 N、N+1……，`--json` 一次返回数组），
+或 MCP 一次 `generate_image` 带 `count`（1–8，串行画完逐张返回）。运行中的作业可以
+取消（Ctrl-C、一句 `cancel <token>` 或 MCP `notifications/cancelled`），停在下一个
+denoise-step 边界，已写完的图保留、没画的不再画（详见
+[Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md)）。要做干净计数的评测，注意取消
+后的返回是部分批次（`isError`），别把 2/4 当成 4/4。
 
 ### 一份权重，多个 agent
 

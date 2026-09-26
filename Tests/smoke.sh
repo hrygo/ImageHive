@@ -117,6 +117,29 @@ case "$tools" in *generate_image*edit_image*describe_image*model_options*model_s
 echo "   tools: $tools"
 case "$versions" in *2026-07-28*) echo "   server/discover: $versions";; *) fail "server/discover did not advertise 2026-07-28";; esac
 
+echo "== generate_image advertises count, and refuses out-of-range counts"
+schema="$(printf '%s\n' "$out" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("id") == 1:
+        for t in message["result"]["tools"]:
+            if t["name"] == "generate_image":
+                print(json.dumps(t["inputSchema"]["properties"].get("count", {})))
+' 2>/dev/null || true)"
+case "$schema" in *'"maximum": 8'*) echo "   count 1...8 in schema" ;; *) fail "count missing from generate_image schema: $schema";; esac
+count_refused="$(printf '%s\n' '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"x","count":9}}}' | "$mcp" 2>/dev/null | python3 -c '
+import json, sys
+print(json.loads(sys.stdin.read())["result"]["isError"])
+' 2>/dev/null || true)"
+[ "$count_refused" = "True" ] || fail "count=9 was not refused"
+echo "   count=9 refused without touching the daemon"
+strict_refused="$(printf '%s\n' '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"x","count":"2"}}}' | "$mcp" 2>/dev/null | python3 -c '
+import json, sys
+print(json.loads(sys.stdin.read())["result"]["isError"])
+' 2>/dev/null || true)"
+[ "$strict_refused" = "True" ] || fail "count=\"2\" was not refused as mistyped"
+echo "   count=\"2\" refused (present-but-wrong-type is an error, never a fallback)"
 echo "== a log channel that goes away costs a log line, not the process"
 # Both binaries used to write their own log lines through `FileHandle`, which raises
 # an Objective-C exception when the write fails — and Swift cannot catch that, so the

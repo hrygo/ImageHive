@@ -531,7 +531,8 @@ let toolCatalogue: [[String: Any]] = [
           "height": {"type": "integer", "minimum": 256, "default": 1024, "description": "Pixels, multiple of 32."},
           "steps": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Diffusion steps; omit for the tier default."},
           "cfg": {"type": "number", "minimum": 0, "maximum": 100, "description": "Classifier-free guidance scale, 0...100; omit for the tier default."},
-          "seed": {"type": "integer", "description": "Fixes generation for reproducibility; omit for random."},
+          "seed": {"type": "integer", "description": "Fixes generation for reproducibility; omit for random. With count > 1 the seeds run N, N+1, ..."},
+          "count": {"type": "integer", "minimum": 1, "maximum": 8, "default": 1, "description": "How many images to draw in one call, serially, with seeds N, N+1, ... One notifications/cancelled stops the whole batch; images already written are kept and reported."},
           "negative": {
             "type": "string",
             "description": "What the image should avoid, for example: blurry, watermark, extra fingers. This is the unconditional branch of guidance, so it only bites when guidance is on (the quality recipe, cfg > 1); with cfg 1.0 it is ignored. The reply and the sidecar record it either way."
@@ -646,6 +647,32 @@ let toolCatalogue: [[String: Any]] = [
 
 // MARK: - argument helpers
 
+/// Whether a request value is really a JSON boolean. `raw is Bool` cannot be
+/// the test: any JSON number that happens to be 0 or 1 also casts to `Bool`,
+/// so it would reject `"seed": 1` as a boolean — the same trap the daemon's
+/// `jsonIsBoolean` exists for. Only CoreFoundation tells `__NSCFBoolean` apart
+/// from a number that merely looks like one.
+func isJSONBoolean(_ value: Any) -> Bool {
+    guard let number = value as? NSNumber else { return false }
+    return CFGetTypeID(number) == CFBooleanGetTypeID()
+}
+
+/// Reads a whole number out of a *request*. Strict, like the daemon's
+/// `intArgStrict`: a key that is present but the wrong type is an error, never
+/// a silent fallback — `"count": "4"` is refused, not read as 4. Only an
+/// absent key means "use the default". (`intValue` below stays lenient on
+/// purpose: it reads display values out of our own daemon's replies, not
+/// caller input.)
+func strictRequestInt(_ value: Any) -> Int? {
+    if isJSONBoolean(value) { return nil }
+    if let n = value as? Int { return n }
+    if let d = value as? Double {
+        guard d.isFinite, d == d.rounded(), d.magnitude <= 9_007_199_254_740_992 else { return nil }
+        return Int(d)
+    }
+    return nil
+}
+
 /// Reads a whole number out of a reply. Deliberately defensive: `Int(d)` traps on a
 /// double outside Int's range, and while these values come from our own daemon, a
 /// front end that dies on a display value is not a front end worth having. `nil` makes
@@ -684,6 +711,80 @@ func stringList(_ any: Any?) -> [String]? {
 }
 
 // MARK: - tool execution
+
+/// One tools/call, several images. Serial daemon calls (the daemon serializes
+/// generations anyway, so parallelism here would only queue there); each image
+/// registers its token under the same call key, so a notifications/cancelled
+/// for the call stops the current image and the loop abandons the rest. Images
+/// already written stay on disk and are reported even when the batch is
+/// cancelled or a later image fails — a partial batch is an answer, not silence.
+func runBatch(name: String, arguments: [String: Any], baseToken: String,
+              count: Int, callKey: String?, inlineThumbnail: Bool) -> [String: Any] {
+    var lines: [String] = []
+    var paths: [String] = []
+    var stopped: String?
+    for i in 0..<count {
+        let jobToken = baseToken + "#" + String(i + 1)
+        if let callKey {
+            inflightLock.lock()
+            inflightTokens[callKey, default: []].append(jobToken)
+            inflightLock.unlock()
+        }
+        var payload: [String: Any] = ["cmd": "generate", "prompt": arguments["prompt"] as Any]
+        for key in ["tier", "width", "height", "steps", "cfg", "negative"] {
+            if let value = arguments[key] { payload[key] = value }
+        }
+        if let rawSeed = arguments["seed"] {
+            // Strict like the daemon: a mistyped seed is refused here, not
+            // silently normalised — and never near Int.max, where `seed + i`
+            // below would trap and take this stateless front end down mid-batch.
+            guard let seed = strictRequestInt(rawSeed), seed >= 0 else {
+                return failure("seed must be a non-negative integer", tool: name)
+            }
+            guard seed <= Int.max - (count - 1) else {
+                return failure("seed \(seed) leaves no room for count \(count) — seeds run N, N+1, ...", tool: name)
+            }
+            payload["seed"] = seed + i
+        }
+        payload["token"] = jobToken
+        let response: [String: Any]
+        do {
+            response = try daemon.call(payload)
+        } catch {
+            stopped = "local image service unavailable: \(error)"
+            break
+        }
+        if (response["ok"] as? Bool) != false {
+            lines.append(summaryLine(response))
+            if let path = response["path"] as? String { paths.append(path) }
+            continue
+        }
+        // A cancelled current image ends the batch: later images never start.
+        // Anything already written is kept and reported below.
+        let err = (response["error"] as? String) ?? "unknown daemon error"
+        if (response["cancelled"] as? Bool) == true {
+            stopped = "batch cancelled after \(paths.count) of \(count) image(s): \(err)"
+        } else {
+            stopped = "image \(i + 1) of \(count) failed: \(err)"
+        }
+        break
+    }
+    var result: [String: Any] = [:]
+    if modernEnvelope { result["resultType"] = "complete" }
+    let body = (lines + (stopped.map { [$0] } ?? [])).joined(separator: "\n")
+    var content: [[String: Any]] = [textBlock(body.isEmpty ? "(no images)" : body)]
+    if inlineThumbnail {
+        for path in paths {
+            if let block = inlineImageBlock(path) { content.append(block) }
+        }
+    }
+    result["content"] = content
+    result["structuredContent"] = ["images": paths, "count": paths.count, "requested": count] as [String: Any]
+    // A partial batch is still an error when something stopped it: the caller
+    // counting samples must not mistake 2 of 4 for 4 of 4.
+    result["isError"] = stopped != nil
+    return result
+}
 
 func summaryLine(_ response: [String: Any]) -> String {
     let path = response["path"] as? String ?? "(no file)"
@@ -731,7 +832,7 @@ func inlineImageBlock(_ path: String) -> [String: Any]? {
     return ["type": "image", "data": data.base64EncodedString(), "mimeType": "image/png"]
 }
 
-func runTool(_ name: String, _ arguments: [String: Any], token: String) -> [String: Any] {
+func runTool(_ name: String, _ arguments: [String: Any], token: String, callKey: String? = nil) -> [String: Any] {
     var payload: [String: Any] = [:]
     var inlineThumbnail = false
 
@@ -739,6 +840,26 @@ func runTool(_ name: String, _ arguments: [String: Any], token: String) -> [Stri
     case "generate_image":
         guard let prompt = arguments["prompt"] as? String, !prompt.isEmpty else {
             return failure("prompt is required", tool: name)
+        }
+        // Batch: count images in one call (1...8), seeds run N, N+1, ... like
+        // the CLI's --n. Serial inside the daemon (it serializes anyway); each
+        // image gets token "<base>#<i>" so one notifications/cancelled stops
+        // the whole batch, and a cancel mid-batch keeps the images already
+        // written. A batch that is cancelled answers isError with the images
+        // so far, not silence.
+        let count: Int
+        if let raw = arguments["count"] {
+            guard let n = strictRequestInt(raw), (1...8).contains(n) else {
+                return failure("count must be an integer 1...8", tool: name)
+            }
+            count = n
+        } else {
+            count = 1
+        }
+        if count > 1 {
+            return runBatch(name: name, arguments: arguments, baseToken: token,
+                            count: count, callKey: callKey,
+                            inlineThumbnail: boolValue(arguments["inline_thumbnail"]) ?? false)
         }
         payload = ["cmd": "generate", "prompt": prompt]
         for key in ["tier", "width", "height", "steps", "cfg", "seed", "negative"] {
@@ -928,11 +1049,12 @@ func replyError(id: Any, code: Int, _ message: String) {
     writeMessage(["jsonrpc": "2.0", "id": id, "error": ["code": code, "message": message]])
 }
 
-/// tools/call ids still running, mapped to the daemon job token that stops
-/// them. Guarded by a lock: the stdio loop writes, background tool threads
-/// delete, and a cancelled notification reads — all on different threads.
+/// tools/call ids still running, mapped to the daemon job tokens that stop
+/// them (one per image in a batch). Guarded by a lock: the stdio loop writes,
+/// background tool threads delete, and a cancelled notification reads — all on
+/// different threads.
 let inflightLock = NSLock()
-var inflightTokens: [String: String] = [:]
+var inflightTokens: [String: [String]] = [:]
 
 /// Set by the SIGINT/SIGTERM handler below; the stdio loop polls it after every
 /// read. A signal handler may not allocate (no JSON, no strings), so it only
@@ -945,7 +1067,7 @@ var terminationRequested = sig_atomic_t(0)
 func cancelInflightAndExit(_ code: Int32) -> Never {
     var orphaned: [String] = []
     inflightLock.lock()
-    orphaned = Array(inflightTokens.values)
+    orphaned = Array(inflightTokens.values).flatMap { $0 }
     inflightTokens.removeAll()
     inflightLock.unlock()
     for token in orphaned { daemon.cancel(token: token) }
@@ -972,13 +1094,23 @@ func handle(_ message: [String: Any]) {
             // boundary; the background thread's reply then carries the
             // cancellation instead of an image.
             if let rid = params["requestId"] {
-                var token: String?
+                var tokens: [String]?
                 inflightLock.lock()
-                token = inflightTokens.removeValue(forKey: idKey(rid))
+                tokens = inflightTokens[idKey(rid)]
+                // Keep the key with an empty list: the batch thread is still
+                // alive (it answers the partial batch), and the stdin-EOF wait
+                // below must not mistake "cancelled" for "drained" and exit
+                // under it. The thread removes the key when it replies. But
+                // only for a call that is real: writing a key for an unknown
+                // request id would leave a ghost behind that the EOF wait
+                // counts as "still running" for its whole 10 minutes.
+                if tokens != nil {
+                    inflightTokens[idKey(rid)] = []
+                }
                 inflightLock.unlock()
-                if let token {
-                    daemon.cancel(token: token)
-                    log("cancelled \(idKey(rid)) (job \(token))")
+                if let tokens {
+                    for token in tokens { daemon.cancel(token: token) }
+                    log("cancelled \(idKey(rid)) (\(tokens.count) job(s))")
                 }
             }
             return
@@ -1037,10 +1169,10 @@ func handle(_ message: [String: Any]) {
         let key = idKey(id)
         let token = arguments["token"] as? String ?? "mcp-\(key)"
         inflightLock.lock()
-        inflightTokens[key] = token
+        inflightTokens[key] = [token]
         inflightLock.unlock()
         Thread {
-            let result = runTool(name, arguments, token: token)
+            let result = runTool(name, arguments, token: token, callKey: key)
             inflightLock.lock()
             inflightTokens.removeValue(forKey: key)
             inflightLock.unlock()

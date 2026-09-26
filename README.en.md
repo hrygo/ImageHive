@@ -277,12 +277,15 @@ prints the same facts as a machine-readable object (an array when `--n > 1`), an
 `--out` moves the image and its sidecar together. `imagehive generate --help`
 lists every flag.
 
-One thing to know before a batch run: **a running job can be cancelled**
-(`cancel <token>`, MCP `notifications/cancelled`, or Ctrl-C on
+One thing to know before a batch run: **two ways to draw several**. The CLI's
+`--n 4` (seeds run N, N+1, ..., one JSON array back with `--json`), or one MCP
+`generate_image` with `count` (1–8, drawn serially). **A running job can be
+cancelled** (`cancel <token>`, MCP `notifications/cancelled`, or Ctrl-C on
 `imagehive generate`) — it ends at its next denoise step and writes no PNG —
 and a waiter queued past the timeout is refused instead of hanging. A disconnect
-cancels only that client's own jobs. See
-[Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md).
+cancels only that client's own jobs. A cancelled batch keeps the images already
+written and answers `isError`, so a partial batch is never mistaken for a full
+one. See [Docs/TROUBLESHOOTING.md](Docs/TROUBLESHOOTING.md).
 
 ### One model, many agents
 
